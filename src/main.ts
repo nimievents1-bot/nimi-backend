@@ -37,14 +37,17 @@ async function bootstrap(): Promise<void> {
   app.useLogger(app.get(Logger));
 
   // ---- Security middleware ----
-  await app.register(helmet, {
+  // The `as never` casts work around a Fastify-version mismatch between
+  // @nestjs/platform-fastify's bundled types and the @fastify/* plugin types.
+  // Runtime behaviour is correct; the types are out of sync between majors.
+  await app.register(helmet as never, {
     // CSP for the API itself is minimal; the browser CSP is set by the web app.
     contentSecurityPolicy: { directives: { defaultSrc: ["'self'"] } },
     crossOriginResourcePolicy: { policy: "cross-origin" },
-  });
+  } as never);
 
   // Cookie support — required for JWT access + refresh cookie flow.
-  await app.register(cookie, { secret: env.JWT_SECRET });
+  await app.register(cookie as never, { secret: env.JWT_SECRET } as never);
 
   app.enableCors({
     origin: env.WEB_ORIGIN,

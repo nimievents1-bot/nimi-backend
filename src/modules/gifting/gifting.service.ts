@@ -451,7 +451,7 @@ export class GiftingService {
           actorId,
           ip: meta.ip ?? null,
           userAgent: meta.userAgent ?? null,
-          after: after ?? undefined,
+          after: (after ?? undefined) as never,
         },
       });
     } catch (err) {

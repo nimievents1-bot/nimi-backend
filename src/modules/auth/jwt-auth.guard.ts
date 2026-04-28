@@ -13,7 +13,9 @@ export class JwtAuthGuard extends AuthGuard("jwt") {
     super();
   }
 
-  override canActivate(ctx: ExecutionContext): ReturnType<AuthGuard["canActivate"]> {
+  // Return type intentionally inferred — AuthGuard("jwt") is a runtime
+  // factory, so `AuthGuard["canActivate"]` doesn't resolve as a type.
+  override canActivate(ctx: ExecutionContext) {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       ctx.getHandler(),
       ctx.getClass(),
