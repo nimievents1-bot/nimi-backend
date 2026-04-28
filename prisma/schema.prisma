@@ -542,18 +542,18 @@ enum CreditTxType {
   REFUND
 }
 
-/**
- * Append-only credit ledger.
- *
- * The customer's available balance is `SUM(amountMinor) WHERE userId = ?`.
- * `balanceAfter` is denormalised for fast reads but must always equal the
- * running sum at write time. A nightly reconciliation job (Phase 7) verifies
- * `balanceAfter` against the recomputed sum and alerts on drift.
- *
- * Idempotency is enforced via `(userId, sourceType, sourceId)` uniqueness for
- * sources that have a stable id (Stripe invoice id, refund id). For ADJUSTMENT
- * and REDEMPTION the source is the admin/order id and uniqueness is per-row.
- */
+///
+/// Append-only credit ledger.
+///
+/// The customer's available balance is `SUM(amountMinor) WHERE userId = ?`.
+/// `balanceAfter` is denormalised for fast reads but must always equal the
+/// running sum at write time. A nightly reconciliation job (Phase 7) verifies
+/// `balanceAfter` against the recomputed sum and alerts on drift.
+///
+/// Idempotency is enforced via `(userId, sourceType, sourceId)` uniqueness for
+/// sources that have a stable id (Stripe invoice id, refund id). For ADJUSTMENT
+/// and REDEMPTION the source is the admin/order id and uniqueness is per-row.
+///
 model CreditTransaction {
   id           String       @id @default(uuid())
   userId       String
