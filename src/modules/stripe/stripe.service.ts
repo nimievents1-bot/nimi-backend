@@ -7,9 +7,11 @@ import { getEnv } from "../../config/env";
  * Thin Stripe client wrapper.
  *
  * - Single Stripe instance shared by the app.
- * - Throws on boot if STRIPE_SECRET_KEY isn't set in production; in dev it
- *   logs a warning and returns a stub-mode flag so checkout endpoints can
- *   short-circuit with a 503 rather than blowing up.
+ * - If STRIPE_SECRET_KEY is missing the app still boots — checkout/subscription
+ *   endpoints will return 503 via `isAvailable()`. In production we log at
+ *   error level so this is loud in the dashboard, but we don't refuse to
+ *   start: the marketing site, blog, and enquiry flows must remain available
+ *   even if payments are temporarily unconfigured.
  * - Webhook signature verification is exposed via `verifyWebhook`, used by
  *   the StripeWebhookController.
  *
@@ -24,10 +26,13 @@ export class StripeService implements OnModuleInit {
   onModuleInit(): void {
     const env = getEnv();
     if (!env.STRIPE_SECRET_KEY) {
+      const msg =
+        "STRIPE_SECRET_KEY not set — Stripe disabled. Checkout and subscription endpoints will return 503 until configured.";
       if (env.NODE_ENV === "production") {
-        throw new Error("STRIPE_SECRET_KEY is required in production");
+        this.logger.error(msg);
+      } else {
+        this.logger.warn(msg);
       }
-      this.logger.warn("STRIPE_SECRET_KEY not set — Stripe disabled (development only)");
       return;
     }
 
