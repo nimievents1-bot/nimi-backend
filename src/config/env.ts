@@ -15,7 +15,10 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().url(),
   SHADOW_DATABASE_URL: z.string().url().optional(),
 
-  REDIS_URL: z.string().url(),
+  // Redis is reserved for distributed rate limiting and BullMQ queues. Until
+  // those are wired up, the throttler runs in-memory and the API can boot
+  // without a Redis service attached. Set it once you spin up Redis.
+  REDIS_URL: z.string().url().optional(),
 
   JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 chars"),
   JWT_REFRESH_SECRET: z.string().min(32, "JWT_REFRESH_SECRET must be at least 32 chars"),
