@@ -1,0 +1,113 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
+import { type FastifyRequest } from "fastify";
+
+import { CurrentUser } from "../../common/decorators/current-user.decorator";
+import { Public } from "../../common/decorators/public.decorator";
+import { Roles } from "../../common/decorators/roles.decorator";
+import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { RolesGuard } from "../auth/roles.guard";
+import { type AuthenticatedUser } from "../auth/types";
+
+import { CravingsService } from "./cravings.service";
+import {
+  AdjustCreditDto,
+  SubscribeDto,
+  UpsertCravingsPlanDto,
+} from "./dto/cravings.dto";
+
+@Controller({ path: "cravings", version: "1" })
+export class CravingsController {
+  constructor(private readonly cravings: CravingsService) {}
+
+  // ---------- public ----------
+
+  @Public()
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  @Get("plans")
+  async listPlans() {
+    const rows = await this.cravings.listActivePlans();
+    return rows.map((p) => ({
+      slug: p.slug,
+      name: p.name,
+      description: p.description,
+      monthlyAmountMinor: p.monthlyAmountMinor,
+      currency: p.currency,
+      position: p.position,
+    }));
+  }
+
+  // ---------- subscribe ----------
+
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ contact: { limit: 5, ttl: 60_000 } })
+  @Post("subscribe")
+  @HttpCode(201)
+  async subscribe(@Body() dto: SubscribeDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.cravings.createSubscriptionCheckout(dto, { id: user.id, email: user.email });
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post("portal")
+  @HttpCode(201)
+  async portal(@CurrentUser() user: AuthenticatedUser) {
+    return this.cravings.createPortalSession(user.id);
+  }
+
+  // ---------- customer reads ----------
+
+  @UseGuards(JwtAuthGuard)
+  @Get("me")
+  async me(@CurrentUser() user: AuthenticatedUser) {
+    return this.cravings.getMySubscription(user.id);
+  }
+}
+
+@Controller({ path: "admin/cravings", version: "1" })
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles("OWNER", "EDITOR")
+export class AdminCravingsController {
+  constructor(private readonly cravings: CravingsService) {}
+
+  @Post("plans")
+  async upsertPlan(@Body() dto: UpsertCravingsPlanDto) {
+    return this.cravings.upsertPlan(dto);
+  }
+
+  @Get("subscribers")
+  async list(
+    @Query("limit") limit?: string,
+    @Query("offset") offset?: string,
+    @Query("status") status?: string,
+  ) {
+    return this.cravings.listAdminSubscribers({
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+      status: status as never,
+    });
+  }
+
+  @Roles("OWNER")
+  @Post("credit/adjust")
+  @HttpCode(200)
+  async adjust(
+    @Body() dto: AdjustCreditDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: FastifyRequest,
+  ) {
+    return this.cravings.adminAdjustCredit(dto.userId, dto.amountMinor, dto.reason, user.id, {
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+  }
+}

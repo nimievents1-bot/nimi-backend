@@ -1,0 +1,91 @@
+name: nimi-api · ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: api-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 20
+
+jobs:
+  build-test:
+    name: lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: nimi
+          POSTGRES_PASSWORD: nimi
+          POSTGRES_DB: nimi_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nimi"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 8
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 8
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://nimi:nimi@localhost:5432/nimi_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: test-secret-32-bytes-long-please-replace-1234
+      JWT_REFRESH_SECRET: test-secret-32-bytes-long-please-replace-5678
+      WEB_ORIGIN: http://localhost:3000
+      LOG_LEVEL: error
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Apply migrations
+        run: pnpm db:deploy
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Audit
+        run: pnpm audit --audit-level=high

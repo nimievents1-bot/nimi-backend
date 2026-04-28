@@ -1,0 +1,578 @@
+// Prisma schema for Nimi Events API.
+//
+// Updated for Phase 1: adds EmailVerificationToken, PasswordResetToken,
+// and ContactEnquiry to support the auth module and the public contact form.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================
+// Identity & access
+// =============================================================
+
+enum Role {
+  CUSTOMER
+  EDITOR
+  SUPPORT
+  OWNER
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String
+  name            String
+  phone           String?
+  role            Role      @default(CUSTOMER)
+  emailVerifiedAt DateTime?
+  totpSecret      String?
+  deletedAt       DateTime?
+
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  refreshTokens          RefreshToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens    PasswordResetToken[]
+  auditLogs              AuditLog[] @relation("AuditActor")
+  subscription           Subscription?
+
+  @@index([role])
+  @@index([deletedAt])
+}
+
+model RefreshToken {
+  id            String    @id @default(uuid())
+  userId        String
+  hash          String    @unique
+  familyId      String
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  ip            String?
+  userAgent     String?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  hash      String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  hash      String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// =============================================================
+// Audit log — append-only
+// =============================================================
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  before    Json?
+  after     Json?
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([actorId, createdAt])
+  @@index([entity, entityId])
+  @@index([action, createdAt])
+}
+
+// =============================================================
+// CMS — content blocks and editorial models
+// =============================================================
+
+model ContentBlock {
+  id          String    @id @default(uuid())
+  page        String
+  key         String
+  locale      String    @default("en")
+  type        String
+  payload     Json
+  version     Int       @default(1)
+  publishedAt DateTime?
+  updatedBy   String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([page, key, locale, version])
+  @@index([page, key, locale, publishedAt])
+}
+
+model Faq {
+  id        String  @id @default(uuid())
+  category  String
+  question  String
+  answer    String
+  position  Int     @default(0)
+  published Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category, position])
+}
+
+model Testimonial {
+  id        String  @id @default(uuid())
+  author    String
+  role      String?
+  quote     String
+  imageUrl  String?
+  position  Int     @default(0)
+  published Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([published, position])
+}
+
+model GalleryImage {
+  id       String  @id @default(uuid())
+  page     String
+  url      String
+  alt      String
+  caption  String?
+  position Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([page, position])
+}
+
+enum BlogPostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+}
+
+model BlogPost {
+  id          String         @id @default(uuid())
+  slug        String         @unique
+  title       String
+  excerpt     String
+  /// Sanitised HTML body. Validated server-side before persist.
+  body        String
+  /// Optional cover image URL.
+  coverUrl    String?
+  /// Optional cover alt text — required when coverUrl is set.
+  coverAlt    String?
+  /// Author display name (free text for now; later could link to a User).
+  authorName  String
+  /// Free-text category label, e.g. "Behind the kitchen", "Gifting", "Cravings".
+  category    String?
+  /// Tag list as JSON array of strings.
+  tags        Json           @default("[]")
+  status      BlogPostStatus @default(DRAFT)
+  publishedAt DateTime?
+  /// SEO meta — separate from `title`/`excerpt` so editors can override.
+  seoTitle       String?
+  seoDescription String?
+  ogImageUrl     String?
+
+  /// Word count snapshot for the index. Server-computed on every save.
+  wordCount Int @default(0)
+
+  /// Audit trail.
+  createdBy String
+  updatedBy String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, publishedAt])
+  @@index([category, status, publishedAt])
+}
+
+// =============================================================
+// Marketing
+// =============================================================
+
+enum NewsletterStatus {
+  PENDING
+  CONFIRMED
+  UNSUBSCRIBED
+}
+
+model NewsletterSubscriber {
+  id          String           @id @default(uuid())
+  email       String           @unique
+  status      NewsletterStatus @default(PENDING)
+  consentAt   DateTime?
+  source      String?
+  externalId  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+// =============================================================
+// Public contact / enquiry form
+// =============================================================
+
+enum ContactStatus {
+  NEW
+  CONTACTED
+  CLOSED
+  SPAM
+}
+
+enum ContactKind {
+  GENERAL
+  CATERING
+  EVENTS
+  GIFTING
+  CRAVINGS
+  PRESS
+}
+
+model ContactEnquiry {
+  id     String        @id @default(uuid())
+  kind   ContactKind   @default(GENERAL)
+  status ContactStatus @default(NEW)
+
+  name  String
+  email String
+  phone String?
+
+  eventDate  DateTime?
+  eventType  String?
+  guestCount Int?
+  budgetBand String?
+  dietary    String?
+
+  notes String
+
+  source    String?
+  ip        String?
+  userAgent String?
+
+  internalNotes String?
+  handledBy     String?
+  handledAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([kind, status])
+  @@index([email])
+}
+
+// =============================================================
+// Gifting commerce
+// =============================================================
+
+enum GiftCategory {
+  CORPORATE
+  WEDDINGS
+  PRIVATE
+}
+
+model GiftCollection {
+  id            String       @id @default(uuid())
+  slug          String       @unique
+  category      GiftCategory
+  name          String
+  description   String
+  /// Items list as a JSON array of strings.
+  items         Json
+  /// Unit price in minor units (pence) — the unit price *per box*.
+  unitPriceMinor Int
+  /// Indicative max price for marketing copy (e.g. £10–£15). Null = exact price.
+  priceMaxMinor Int?
+  currency      String       @default("gbp")
+  moq           Int          @default(1)
+  leadTimeDays  Int          @default(56)
+  imageUrl      String?
+  published     Boolean      @default(false)
+  position      Int          @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems GiftOrderItem[]
+
+  @@index([category, published, position])
+  @@index([published, position])
+}
+
+enum GiftOrderStatus {
+  /// Stripe Checkout Session created; payment not yet completed.
+  PENDING_PAYMENT
+  /// Payment succeeded; admin needs to send a design mock-up.
+  AWAITING_DESIGN_APPROVAL
+  /// Admin has uploaded a mock-up; customer needs to approve.
+  DESIGN_SENT
+  /// Customer approved; production starts.
+  IN_PRODUCTION
+  /// Order has shipped.
+  SHIPPED
+  /// Order delivered.
+  DELIVERED
+  /// Cancelled before/after payment.
+  CANCELLED
+  /// Refunded after payment.
+  REFUNDED
+}
+
+model GiftOrder {
+  id        String          @id @default(uuid())
+  /// Human-readable reference, e.g. NIMI-2026-0001.
+  reference String          @unique
+  userId    String?
+  email     String
+  name      String
+  status    GiftOrderStatus @default(PENDING_PAYMENT)
+
+  totalMinor Int
+  currency   String @default("gbp")
+
+  stripeSessionId       String? @unique
+  stripePaymentIntentId String? @unique
+
+  shippingLine1    String?
+  shippingLine2    String?
+  shippingCity     String?
+  shippingPostcode String?
+  shippingCountry  String?
+
+  notes         String?
+  internalNotes String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  paidAt      DateTime?
+  approvedAt  DateTime?
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+
+  items GiftOrderItem[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([email])
+}
+
+model GiftOrderItem {
+  id           String @id @default(uuid())
+  orderId      String
+  collectionId String
+
+  /// Immutable snapshot of the collection at order time — name, description,
+  /// items, price. Surviving collection deletion or price changes.
+  collectionSnapshot Json
+
+  quantity       Int
+  unitPriceMinor Int
+  totalMinor     Int
+
+  /// Customisation payload: { names, dates, colourTheme, message, logoUrl } — all optional.
+  customisation Json?
+
+  createdAt DateTime @default(now())
+
+  order      GiftOrder      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  collection GiftCollection @relation(fields: [collectionId], references: [id])
+
+  @@index([orderId])
+}
+
+/// Append-only Stripe event log for idempotency + reconciliation.
+model StripeEvent {
+  id          String    @id // Stripe event id (evt_…)
+  type        String
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  /// Full Stripe event payload — useful for replays and audits.
+  payload     Json
+
+  @@index([type, receivedAt])
+}
+
+/// Sequence used to allocate the human-readable reference for a GiftOrder.
+/// Postgres SEQUENCE handles concurrency for us; this row exists only as a
+/// versioning anchor for migrations.
+model OrderSequenceMarker {
+  id        String   @id @default(uuid())
+  year      Int
+  next      Int      @default(1)
+  updatedAt DateTime @updatedAt
+
+  @@unique([year])
+}
+
+// =============================================================
+// Pastry Cravings — subscriptions + rolling credit ledger
+// =============================================================
+
+model CravingsPlan {
+  id                 String   @id @default(uuid())
+  slug               String   @unique
+  name               String
+  /// Monthly subscription amount in minor units (pence).
+  monthlyAmountMinor Int
+  currency           String   @default("gbp")
+  /// Stripe Price id for this plan (price_…). Allocated when the plan is published.
+  stripePriceId      String?  @unique
+  /// Stripe Product id for this plan (prod_…).
+  stripeProductId    String?  @unique
+  active             Boolean  @default(false)
+  position           Int      @default(0)
+  description        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([active, position])
+}
+
+enum SubscriptionStatus {
+  /// Trial / pending — Stripe says `incomplete` etc. Treat as not yet earning credit.
+  PENDING
+  /// Active and earning credit on each invoice.paid.
+  ACTIVE
+  /// Paused via Stripe Customer Portal — no charges, no accrual.
+  PAUSED
+  /// Past-due / unpaid — Stripe will retry.
+  PAST_DUE
+  /// Cancelled but credit may still be redeemable until expiry.
+  CANCELLED
+  /// Cancelled and credit expired.
+  ENDED
+}
+
+model Subscription {
+  id                    String              @id @default(uuid())
+  userId                String              @unique
+  planId                String?
+  stripeCustomerId      String              @unique
+  stripeSubscriptionId  String?             @unique
+  status                SubscriptionStatus  @default(PENDING)
+  /// Snapshot of the monthly amount at last sync. Source of truth is Stripe;
+  /// this is for fast read paths (e.g. account dashboard).
+  monthlyAmountMinor    Int
+  currency              String              @default("gbp")
+  currentPeriodStart    DateTime?
+  currentPeriodEnd      DateTime?
+  pausedUntil           DateTime?
+  cancelAt              DateTime?
+  cancelledAt           DateTime?
+  /// Date after which any remaining credit balance expires (12 months after cancel by default).
+  creditExpiresAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan CravingsPlan? @relation(fields: [planId], references: [id])
+
+  @@index([status])
+  @@index([planId])
+}
+
+enum CreditTxType {
+  /// Monthly accrual on invoice.paid.
+  ACCRUAL
+  /// Customer redeemed against a pastry order.
+  REDEMPTION
+  /// Manual adjustment by an admin (e.g. apology credit).
+  ADJUSTMENT
+  /// Credit cap reached — overflow forfeited.
+  CAP_FORFEIT
+  /// Credit expired N months after subscription cancellation.
+  EXPIRY
+  /// Refund (negative balance correction).
+  REFUND
+}
+
+/**
+ * Append-only credit ledger.
+ *
+ * The customer's available balance is `SUM(amountMinor) WHERE userId = ?`.
+ * `balanceAfter` is denormalised for fast reads but must always equal the
+ * running sum at write time. A nightly reconciliation job (Phase 7) verifies
+ * `balanceAfter` against the recomputed sum and alerts on drift.
+ *
+ * Idempotency is enforced via `(userId, sourceType, sourceId)` uniqueness for
+ * sources that have a stable id (Stripe invoice id, refund id). For ADJUSTMENT
+ * and REDEMPTION the source is the admin/order id and uniqueness is per-row.
+ */
+model CreditTransaction {
+  id           String       @id @default(uuid())
+  userId       String
+  type         CreditTxType
+  /// Positive for accrual/adjustment, negative for redemption/expiry/forfeit.
+  amountMinor  Int
+  /// Running balance after this transaction is applied.
+  balanceAfter Int
+  /// E.g. "stripe.invoice", "stripe.refund", "order.refund", "admin", "system.expiry".
+  sourceType   String
+  /// E.g. invoice id, order id, audit log id.
+  sourceId     String?
+  reason       String?
+  /// Who initiated the transaction (admin user id, or "system" for automated).
+  createdBy    String
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, sourceType, sourceId])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+}
