@@ -15,6 +15,11 @@ import {
 import type Stripe from "stripe";
 
 import { getEnv } from "../../config/env";
+import {
+  indulgenceCreditsIssuedTemplate,
+  indulgenceWelcomeTemplate,
+} from "../mailer/indulgence-templates";
+import { MailerService } from "../mailer/mailer.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
 
@@ -64,6 +69,7 @@ export class CravingsService {
   constructor(
     private readonly db: PrismaService,
     private readonly stripe: StripeService,
+    private readonly mailer: MailerService,
   ) {}
 
   // ---------- public catalog ----------
@@ -372,6 +378,25 @@ export class CravingsService {
       },
       update: data,
     });
+
+    // Send the welcome email on the *first* transition to ACTIVE. We
+    // detect "first transition" by checking that we don't already have a
+    // CONFIRMATION row for this subscription id — idempotent against
+    // Stripe webhook retries and the rare ACTIVE → PAUSED → ACTIVE flow.
+    if (status === SubscriptionStatus.ACTIVE) {
+      try {
+        await this.sendWelcomeIfFirstTime({
+          userId,
+          stripeSubscriptionId: sub.id,
+          monthlyAmountMinor,
+        });
+      } catch (err) {
+        this.logger.warn(
+          { err, userId, subscriptionId: sub.id },
+          "Indulgence welcome email failed (non-fatal)",
+        );
+      }
+    }
   }
 
   /**
@@ -395,7 +420,7 @@ export class CravingsService {
 
     if (invoice.amount_paid <= 0) return;
 
-    await this.applyTransaction({
+    const result = await this.applyTransaction({
       userId: ourSub.userId,
       type: CreditTxType.ACCRUAL,
       amountMinor: invoice.amount_paid,
@@ -405,6 +430,35 @@ export class CravingsService {
       createdBy: "system",
       meta: {},
     });
+
+    // Send the "credits available" email — only when `applied: true`, so
+    // duplicate webhook deliveries don't double-mail the customer.
+    if (result.applied) {
+      try {
+        const user = await this.db.user.findUnique({
+          where: { id: ourSub.userId },
+          select: { email: true, name: true },
+        });
+        if (user) {
+          const tpl = indulgenceCreditsIssuedTemplate({
+            firstName: firstNameOf(user.name) ?? user.name,
+            amountMinor: invoice.amount_paid,
+            balanceMinor: result.balanceAfter,
+            accountUrl: `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/account/subscription`,
+          });
+          await this.mailer.send({
+            to: user.email,
+            ...tpl,
+            tag: "indulgence-credits-issued",
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          { err, invoiceId: invoice.id },
+          "Indulgence credits-issued email failed (non-fatal)",
+        );
+      }
+    }
   }
 
   /**
@@ -558,6 +612,61 @@ export class CravingsService {
 
   // ---------- helpers ----------
 
+  /**
+   * Send the Indulgence Club welcome email exactly once per Stripe
+   * subscription. Idempotency is enforced via an auditLog row; any
+   * re-delivery of the `customer.subscription.{created,updated}` event
+   * just sees the marker and skips.
+   *
+   * Why audit log and not a column on Subscription: it avoids a schema
+   * change, gives us a free trail of when the welcome was sent, and
+   * survives plan changes / re-subscriptions cleanly (each new Stripe
+   * subscription id is its own welcome trigger).
+   */
+  private async sendWelcomeIfFirstTime(opts: {
+    userId: string;
+    stripeSubscriptionId: string;
+    monthlyAmountMinor: number;
+  }): Promise<void> {
+    const marker = await this.db.auditLog.findFirst({
+      where: {
+        entity: "Subscription",
+        entityId: opts.stripeSubscriptionId,
+        action: "subscription.welcome_sent",
+      },
+      select: { id: true },
+    });
+    if (marker) return;
+
+    const user = await this.db.user.findUnique({
+      where: { id: opts.userId },
+      select: { email: true, name: true },
+    });
+    if (!user) return;
+
+    const tpl = indulgenceWelcomeTemplate({
+      firstName: firstNameOf(user.name) ?? user.name,
+      monthlyAmountMinor: opts.monthlyAmountMinor,
+      accountUrl: `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/account/subscription`,
+    });
+
+    await this.mailer.send({
+      to: user.email,
+      ...tpl,
+      tag: "indulgence-welcome",
+    });
+
+    // Persist the marker so a webhook retry never double-sends.
+    await this.db.auditLog.create({
+      data: {
+        action: "subscription.welcome_sent",
+        entity: "Subscription",
+        entityId: opts.stripeSubscriptionId,
+        actorId: "system",
+      },
+    });
+  }
+
   private async ensureStripeCustomer(user: SessionUser): Promise<string> {
     const existing = await this.db.subscription.findUnique({ where: { userId: user.id } });
     if (existing?.stripeCustomerId) return existing.stripeCustomerId;
@@ -606,4 +715,10 @@ function addMonths(date: Date, months: number): Date {
   const d = new Date(date);
   d.setMonth(d.getMonth() + months);
   return d;
+}
+
+function firstNameOf(displayName: string): string | undefined {
+  const trimmed = displayName.trim();
+  if (!trimmed) return undefined;
+  return trimmed.split(/\s+/)[0];
 }

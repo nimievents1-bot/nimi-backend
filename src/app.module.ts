@@ -13,12 +13,14 @@ import { BlogModule } from "./modules/blog/blog.module";
 import { ContactModule } from "./modules/contact/contact.module";
 import { ContentModule } from "./modules/content/content.module";
 import { CravingsModule } from "./modules/cravings/cravings.module";
+import { CronModule } from "./modules/cron/cron.module";
 import { GiftingModule } from "./modules/gifting/gifting.module";
 import { HealthModule } from "./modules/health/health.module";
 import { MailerModule } from "./modules/mailer/mailer.module";
 import { NewsletterModule } from "./modules/newsletter/newsletter.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { StripeModule } from "./modules/stripe/stripe.module";
+import { TestimonialsModule } from "./modules/testimonials/testimonials.module";
 import { WebhooksModule } from "./modules/webhooks/webhooks.module";
 
 /**
@@ -82,7 +84,9 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
     GiftingModule,
     CravingsModule,
     BlogModule,
+    TestimonialsModule,
     AdminModule,
+    CronModule,
     WebhooksModule,
     // Domain modules — added phase by phase:
     // UploadsModule.

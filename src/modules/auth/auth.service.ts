@@ -65,12 +65,23 @@ export class AuthService {
     }
 
     const passwordHash = await this.password.hash(dto.password);
+    // Only persist DOB when both day + month are present and self-consistent
+    // (e.g. day 31 with month 2 is rejected). A half-set DOB would never fire
+    // the birthday flow, so we drop it server-side rather than store junk.
+    const dobValid =
+      dto.birthDay !== undefined &&
+      dto.birthMonth !== undefined &&
+      isValidDayMonth(dto.birthDay, dto.birthMonth);
+
     const user = await this.db.user.create({
       data: {
         email: dto.email.toLowerCase(),
         name: dto.name.trim(),
         phone: dto.phone?.trim() || null,
         passwordHash,
+        ...(dobValid
+          ? { birthDay: dto.birthDay, birthMonth: dto.birthMonth }
+          : {}),
       },
       select: { id: true, email: true, name: true, role: true, emailVerifiedAt: true },
     });
@@ -351,4 +362,30 @@ export class AuthService {
       this.logger.error({ err, action }, "Failed to write audit log");
     }
   }
+}
+
+/**
+ * Validate a (day, month) pair without trusting the year. Used to reject
+ * impossible birthdays (Feb 31, etc.) at register time. Treats Feb as
+ * having 29 days so leap-year birthdays remain valid.
+ */
+function isValidDayMonth(day: number, month: number): boolean {
+  if (!Number.isInteger(day) || !Number.isInteger(month)) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1) return false;
+  const daysInMonth: Record<number, number> = {
+    1: 31,
+    2: 29,
+    3: 31,
+    4: 30,
+    5: 31,
+    6: 30,
+    7: 31,
+    8: 31,
+    9: 30,
+    10: 31,
+    11: 30,
+    12: 31,
+  };
+  return day <= (daysInMonth[month] ?? 0);
 }

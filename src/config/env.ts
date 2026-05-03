@@ -38,6 +38,13 @@ const EnvSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   RESEND_AUDIENCE_ID: z.string().optional(),
 
+  // Shared secret presented in the `x-cron-secret` header by the scheduler
+  // that triggers daily flows (birthday emails, unused-credit reminders).
+  // 32+ chars recommended. If unset, the cron endpoints refuse all calls
+  // — preventing accidental triggering before the operator has wired up a
+  // scheduler. Generate with `openssl rand -hex 32`.
+  CRON_SECRET: z.string().min(16).optional(),
+
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),

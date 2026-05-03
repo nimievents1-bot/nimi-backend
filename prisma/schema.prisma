@@ -35,6 +35,14 @@ model User {
   totpSecret      String?
   deletedAt       DateTime?
 
+  /// Day of month the customer's birthday falls on (1–31). Optional.
+  /// Year is intentionally not collected — we only need DD/MM to fire the
+  /// Klaviyo birthday flow each year, and avoiding the year means we don't
+  /// hold age-related PII or hit GDPR special-category data thresholds.
+  birthDay   Int?
+  /// Month of birthday (1–12). Optional, paired with `birthDay`.
+  birthMonth Int?
+
   failedLoginCount Int       @default(0)
   lockedUntil      DateTime?
 
@@ -575,4 +583,50 @@ model CreditTransaction {
   @@unique([userId, sourceType, sourceId])
   @@index([userId, createdAt])
   @@index([type, createdAt])
+}
+
+// =============================================================
+// Testimonials — public-facing reviews with admin CRUD.
+// =============================================================
+
+///
+/// A customer testimonial / review surfaced on the marketing site.
+///
+/// Status model:
+///   - `isPublished = false` keeps a row in the admin list but hides it
+///     from public endpoints. Admins control publish/unpublish without
+///     deleting the row, so audit history is preserved.
+///   - `displayOrder` lets the founder hand-curate which testimonial
+///     leads the section (lower number = earlier in the list).
+///
+/// Consent + privacy:
+///   - `authorName` should be the display name the customer agreed to.
+///     We don't store full names by default; admin enters whatever was
+///     consented to (e.g. "Ada O." or "Ada & Tobi").
+///   - No PII beyond a display name is captured.
+///
+model Testimonial {
+  id           String   @id @default(uuid())
+  /// Display name as the customer consented to.
+  authorName   String
+  /// Free-text role/context — e.g. "Bride", "Head of Events", "Wedding · Sept 2025".
+  role         String?
+  /// The testimonial body. Plain text, max ~1KB enforced at API level.
+  body         String
+  /// 1–5 stars. Optional — many testimonials don't include a numeric rating.
+  rating       Int?
+  /// Free-text event type — wedding, corporate, birthday, etc.
+  eventType    String?
+  /// Visible on the public site only when true.
+  isPublished  Boolean  @default(false)
+  /// Lower numbers render first. Use 0 for "no preference".
+  displayOrder Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
+
+  @@index([isPublished, displayOrder])
+  @@index([createdAt])
 }

@@ -1,11 +1,15 @@
+import { Type } from "class-transformer";
 import {
   IsEmail,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
   Length,
   Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
 } from "class-validator";
 
@@ -35,6 +39,18 @@ export class RegisterDto {
 
   @IsOptional() @IsString() @MaxLength(32)
   phone?: string;
+
+  /**
+   * Optional birthday (day + month only, never year). Used to fire the
+   * Klaviyo birthday flow. We don't store the year to keep this out of
+   * GDPR special-category data and to make the field feel low-stakes.
+   * Both must be provided together — the API ignores a half-set DOB.
+   */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(31)
+  birthDay?: number;
+
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(12)
+  birthMonth?: number;
 }
 
 export class LoginDto {

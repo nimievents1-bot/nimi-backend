@@ -125,7 +125,9 @@ export class NewsletterService {
       data: { status: NewsletterStatus.CONFIRMED, consentAt: new Date() },
     });
 
-    // TODO(Phase 2): sync to Resend Audiences
+    // Optional: sync to Resend Audiences for marketing-list management.
+    // Done in a follow-up — for now the confirmation email is enough.
+
     return { ok: true };
   }
 
