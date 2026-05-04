@@ -72,7 +72,12 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  // 20/min IP throttle — combined with the per-account 8-failed-login
+  // lockout in AuthService, this is still strong brute-force protection
+  // (an attacker would burn one IP every 24s without progress) while
+  // letting legitimate users retry a fat-fingered password without
+  // hitting "Too Many Requests".
+  @Throttle({ auth: { limit: 20, ttl: 60_000 } })
   @Post("login")
   @HttpCode(200)
   async login(
