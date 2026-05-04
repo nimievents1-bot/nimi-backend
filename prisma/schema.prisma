@@ -171,21 +171,6 @@ model Faq {
   @@index([category, position])
 }
 
-model Testimonial {
-  id        String  @id @default(uuid())
-  author    String
-  role      String?
-  quote     String
-  imageUrl  String?
-  position  Int     @default(0)
-  published Boolean @default(false)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([published, position])
-}
-
 model GalleryImage {
   id       String  @id @default(uuid())
   page     String
