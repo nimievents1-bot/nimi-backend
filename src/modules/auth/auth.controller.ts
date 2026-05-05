@@ -46,7 +46,7 @@ export class AuthController {
   // ---------- public ----------
 
   @Public()
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("register")
   @HttpCode(201)
   async register(
@@ -77,7 +77,7 @@ export class AuthController {
   // (an attacker would burn one IP every 24s without progress) while
   // letting legitimate users retry a fat-fingered password without
   // hitting "Too Many Requests".
-  @Throttle({ auth: { limit: 20, ttl: 60_000 } })
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post("login")
   @HttpCode(200)
   async login(
@@ -99,7 +99,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ auth: { limit: 30, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post("refresh")
   @HttpCode(200)
   async refresh(
@@ -137,7 +137,7 @@ export class AuthController {
   // ---------- email verification ----------
 
   @Public()
-  @Throttle({ auth: { limit: 30, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post("verify-email")
   @HttpCode(200)
   async verifyEmail(@Body() dto: VerifyEmailDto, @Req() req: FastifyRequest) {
@@ -150,7 +150,7 @@ export class AuthController {
   // ---------- password reset ----------
 
   @Public()
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("forgot-password")
   @HttpCode(200)
   async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: FastifyRequest) {
@@ -162,7 +162,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("reset-password")
   @HttpCode(200)
   async resetPassword(@Body() dto: ResetPasswordDto, @Req() req: FastifyRequest) {

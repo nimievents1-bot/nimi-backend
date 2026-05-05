@@ -22,7 +22,7 @@ export class CheckoutController {
   constructor(private readonly gifting: GiftingService) {}
 
   @Public()
-  @Throttle({ contact: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("session")
   @HttpCode(201)
   async createSession(

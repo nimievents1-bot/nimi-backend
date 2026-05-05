@@ -49,7 +49,7 @@ export class MfaController {
   // ---------- enrol (logged-in) ----------
 
   @UseGuards(JwtAuthGuard)
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("setup/begin")
   @HttpCode(200)
   async beginSetup(@CurrentUser() user: AuthenticatedUser) {
@@ -61,7 +61,7 @@ export class MfaController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("setup/confirm")
   @HttpCode(200)
   async confirmSetup(
@@ -83,7 +83,7 @@ export class MfaController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("disable")
   @HttpCode(200)
   async disable(
@@ -100,7 +100,7 @@ export class MfaController {
   // ---------- challenge (no session yet) ----------
 
   @Public()
-  @Throttle({ auth: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("challenge")
   @HttpCode(200)
   async challenge(

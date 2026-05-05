@@ -68,10 +68,24 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
         customProps: () => ({ service: "nimi-api" }),
       },
     }),
+    /**
+     * Single global throttler. Earlier we layered three buckets ("default",
+     * "auth", "contact") thinking each route would opt-in via @Throttle —
+     * but @nestjs/throttler v6 actually applies *all* configured buckets to
+     * every route by default unless explicitly skipped. That meant /auth/me
+     * (no decorator) silently inherited the strictest bucket (contact: 3/min),
+     * which broke session checks on every page navigation in production
+     * because the account layout + page each call requireSessionUser → 2
+     * /auth/me hits per render → 3-bucket exhausted after one navigation.
+     *
+     * The right model: one generous global default, and tighter per-route
+     * limits via @Throttle on the few endpoints that actually need them
+     * (login = 20/min, register/forgot/reset = 5/min, contact-form = 3/min).
+     * Each per-route @Throttle REPLACES the default for that route, so
+     * there's no cross-bucket interference.
+     */
     ThrottlerModule.forRoot([
-      { name: "default", ttl: 60_000, limit: 60 },
-      { name: "auth", ttl: 60_000, limit: 5 },
-      { name: "contact", ttl: 60_000, limit: 3 },
+      { name: "default", ttl: 60_000, limit: 120 },
     ]),
     PrismaModule,
     StripeModule,

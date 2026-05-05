@@ -17,7 +17,7 @@ export class ContactController {
   constructor(private readonly contact: ContactService) {}
 
   @Public()
-  @Throttle({ contact: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   @Post()
   @HttpCode(201)
   async create(@Body() dto: CreateContactEnquiryDto, @Req() req: FastifyRequest) {

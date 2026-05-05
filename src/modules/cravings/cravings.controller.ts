@@ -50,7 +50,7 @@ export class CravingsController {
   // ---------- subscribe ----------
 
   @UseGuards(JwtAuthGuard)
-  @Throttle({ contact: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("subscribe")
   @HttpCode(201)
   async subscribe(@Body() dto: SubscribeDto, @CurrentUser() user: AuthenticatedUser) {

@@ -20,7 +20,7 @@ export class NewsletterController {
   constructor(private readonly newsletter: NewsletterService) {}
 
   @Public()
-  @Throttle({ contact: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   @Post("subscribe")
   @HttpCode(202)
   async subscribe(@Body() dto: SubscribeDto, @Req() req: FastifyRequest) {
