@@ -54,6 +54,8 @@ model User {
   passwordResetTokens    PasswordResetToken[]
   auditLogs              AuditLog[] @relation("AuditActor")
   subscription           Subscription?
+  pastryCart             PastryCart?
+  pastryOrders           PastryOrder[]
 
   @@index([role])
   @@index([deletedAt])
@@ -614,4 +616,219 @@ model Testimonial {
 
   @@index([isPublished, displayOrder])
   @@index([createdAt])
+}
+
+// =============================================================
+// Pastries — the menu of items customers buy with cash + Indulgence Credits.
+// =============================================================
+
+///
+/// A single pastry / drink item in the Indulgence Club menu.
+///
+/// Pricing is stored in minor units (pence) to avoid float drift. The
+/// admin manages the catalog via /admin/menu; the public /cravings page
+/// renders only `available = true` items sorted by `displayOrder` then
+/// `createdAt`.
+///
+/// `tags` is a free-form JSON array of short labels (e.g. `["savoury",
+/// "spicy"]`). Used for filtering and presentation hints — never for
+/// pricing logic. Keep tags lowercase, dash-separated, < 24 chars each.
+///
+/// `batchLimit` is the max units the kitchen can produce in one fulfilment
+/// window. NULL means unlimited. The cart enforces this by checking
+/// existing order quantities for the same fulfilment day at checkout time.
+///
+/// Order items snapshot the entire item at order creation, so renaming
+/// or deleting a `PastryItem` later doesn't corrupt historical orders.
+///
+model PastryItem {
+  id           String  @id @default(uuid())
+  /// URL-safe identifier — used in admin URLs and as a stable handle in
+  /// audit logs. Lowercase letters, numbers, hyphens.
+  slug         String  @unique
+  name         String
+  description  String?
+
+  priceMinor   Int
+  currency     String  @default("gbp")
+
+  imageUrl     String?
+  imageAlt     String?
+
+  /// Free-form lowercase tags. Stored as JSON for flexibility.
+  tags         Json    @default("[]")
+
+  /// Daily/per-batch unit cap. NULL = no cap.
+  batchLimit   Int?
+  /// Days from order to ready (0 = same day, 1 = next day, etc).
+  leadTimeDays Int     @default(0)
+
+  /// Lower renders earlier. Hand-curated by admin.
+  displayOrder Int     @default(0)
+  /// Public surface shows only `available = true`.
+  available    Boolean @default(false)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdBy    String?
+  updatedBy    String?
+
+  @@index([available, displayOrder])
+  @@index([createdAt])
+
+  cartItems  PastryCartItem[]
+  orderItems PastryOrderItem[]
+}
+
+// =============================================================
+// Pastry cart + orders.
+// =============================================================
+
+///
+/// Per-user cart. v1 supports authenticated users only — guest carts add
+/// complexity we don't need for soft launch and the Indulgence Club value
+/// proposition assumes an account anyway. The cart is always 1:1 with the
+/// user (`@unique`), so adding the same item twice updates a single
+/// PastryCartItem row instead of duplicating.
+///
+model PastryCart {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items PastryCartItem[]
+}
+
+model PastryCartItem {
+  id           String     @id @default(uuid())
+  cartId       String
+  cart         PastryCart @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  pastryItemId String
+  pastryItem   PastryItem @relation(fields: [pastryItemId], references: [id], onDelete: Cascade)
+  quantity     Int
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  /// One row per (cart, item). Adjusting quantity updates the existing row.
+  @@unique([cartId, pastryItemId])
+}
+
+///
+/// Pastry order status pipeline. Distinct from GiftOrderStatus because
+/// pastries skip the design-approval step.
+///
+enum PastryOrderStatus {
+  /// Stripe Checkout session created; payment not yet completed.
+  PENDING_PAYMENT
+  /// Payment succeeded. Kitchen hasn't started yet.
+  PAID
+  /// Kitchen has started production.
+  PREPARING
+  /// Ready for collection or pickup-by-courier.
+  READY
+  /// Out for delivery.
+  SHIPPED
+  /// Delivered to recipient.
+  DELIVERED
+  /// Cancelled before/after payment.
+  CANCELLED
+  /// Refunded after payment.
+  REFUNDED
+}
+
+///
+/// A pastry order. Created in PENDING_PAYMENT before Stripe Checkout
+/// redirect; promoted to PAID by the webhook on `checkout.session.completed`.
+///
+/// Pricing breakdown:
+///   - subtotalMinor       = sum of unitPrice × qty across items
+///   - creditAppliedMinor  = Indulgence Credits auto-applied at checkout
+///   - totalMinor          = subtotal − credit; this is what Stripe charges
+///
+/// Credits are deducted in the same DB transaction as the order PAID
+/// transition, so a credit is never debited without a confirmed payment.
+///
+/// `creditTransactionId` cross-references the CreditTransaction row that
+/// moved the balance, for audit traceability.
+///
+model PastryOrder {
+  id        String            @id @default(uuid())
+  /// Human-readable reference, e.g. NIMI-P-2026-0001.
+  reference String            @unique
+  userId    String
+  user      User              @relation(fields: [userId], references: [id])
+  email     String
+  name      String
+  phone     String?
+  status    PastryOrderStatus @default(PENDING_PAYMENT)
+
+  subtotalMinor      Int
+  creditAppliedMinor Int    @default(0)
+  totalMinor         Int
+  currency           String @default("gbp")
+
+  stripeSessionId       String? @unique
+  stripePaymentIntentId String? @unique
+
+  /// Set when the credit deduction transaction was written.
+  creditTransactionId String? @unique
+
+  /// Delivery is the v1 default. Address is required at checkout.
+  shippingLine1    String
+  shippingLine2    String?
+  shippingCity     String
+  shippingPostcode String
+  shippingCountry  String  @default("GB")
+
+  /// Customer-facing notes (allergies, instructions, gate codes etc.).
+  notes         String?
+  /// Admin-only notes — never surfaced in customer email.
+  internalNotes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  paidAt      DateTime?
+  preparingAt DateTime?
+  readyAt     DateTime?
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+  cancelledAt DateTime?
+
+  items PastryOrderItem[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+///
+/// Snapshot of a pastry at order time. We persist the original item id
+/// for analytics, but render history from the snapshot fields so renaming
+/// or deleting a PastryItem later doesn't corrupt past orders.
+///
+model PastryOrderItem {
+  id             String       @id @default(uuid())
+  orderId        String
+  order          PastryOrder  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  pastryItemId   String?
+  pastryItem     PastryItem?  @relation(fields: [pastryItemId], references: [id], onDelete: SetNull)
+  /// `{ slug, name, description, imageUrl, tags }` snapshot at order time.
+  itemSnapshot   Json
+  quantity       Int
+  unitPriceMinor Int
+  totalMinor     Int
+
+  createdAt DateTime @default(now())
+}
+
+///
+/// Sequence marker for human-readable order references (NIMI-P-YYYY-NNNN).
+/// Mirrors the existing OrderSequenceMarker pattern used for gift orders.
+///
+model PastryOrderSequenceMarker {
+  /// Year, e.g. 2026. Each year resets the counter.
+  year       Int @id
+  nextNumber Int @default(1)
 }

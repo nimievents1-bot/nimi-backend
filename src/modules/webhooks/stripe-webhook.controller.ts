@@ -14,6 +14,7 @@ import type Stripe from "stripe";
 import { Public } from "../../common/decorators/public.decorator";
 import { CravingsService } from "../cravings/cravings.service";
 import { GiftingService } from "../gifting/gifting.service";
+import { PastryOrdersService } from "../pastry-orders/pastry-orders.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
 
@@ -39,6 +40,7 @@ export class StripeWebhookController {
     private readonly stripe: StripeService,
     private readonly gifting: GiftingService,
     private readonly cravings: CravingsService,
+    private readonly pastryOrders: PastryOrdersService,
     private readonly db: PrismaService,
   ) {}
 
@@ -113,14 +115,20 @@ export class StripeWebhookController {
 
   private async dispatch(event: Stripe.Event): Promise<void> {
     switch (event.type) {
-      // ----- Gifting (one-off payments) -----
+      // ----- One-off payments (gifting + pastry orders) -----
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
         if (session.mode === "subscription") {
           // Subscriptions are mirrored from customer.subscription.* events.
           break;
         }
-        await this.gifting.onCheckoutSessionCompleted(session);
+        // Route by metadata.kind set on session creation. Gifting sessions
+        // omit `kind`, so we fall through to the gifting handler by default.
+        if (session.metadata?.kind === "pastry_order") {
+          await this.pastryOrders.onCheckoutCompleted(event);
+        } else {
+          await this.gifting.onCheckoutSessionCompleted(session);
+        }
         break;
       }
       case "checkout.session.async_payment_succeeded":
