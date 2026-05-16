@@ -26,10 +26,34 @@ const EnvSchema = z.object({
   JWT_REFRESH_TTL: z.coerce.number().int().positive().default(2_592_000),
   COOKIE_DOMAIN: z.string().min(1).default("localhost"),
 
+  /**
+   * Comma-separated list of allowed CORS origins. This list answers the
+   * question "who is allowed to call the API from the browser?" — it may
+   * legitimately contain preview deploys, staging, www-prefixed and bare
+   * variants, etc. Order is NOT meaningful and MUST NOT be used to build
+   * user-facing URLs (use WEB_PUBLIC_URL for that — see below).
+   */
   WEB_ORIGIN: z
     .string()
     .min(1)
-    .transform((s) => s.split(",").map((origin) => origin.trim())),
+    .transform((s) => s.split(",").map((origin) => origin.trim()).filter(Boolean)),
+
+  /**
+   * The canonical, customer-facing public URL of the web app. Used to
+   * build absolute links inside transactional emails (verify, reset,
+   * receipts, admin notifications, etc.). MUST be a single URL — never
+   * a Vercel preview, never with a trailing slash.
+   *
+   * Falls back to `WEB_ORIGIN[0]` only for backwards-compat with older
+   * deploys that haven't set this yet; new environments should always
+   * set WEB_PUBLIC_URL explicitly to avoid the "first CORS origin
+   * accidentally became the public URL" footgun.
+   */
+  WEB_PUBLIC_URL: z
+    .string()
+    .url()
+    .transform((s) => s.replace(/\/+$/, ""))
+    .optional(),
 
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
@@ -79,4 +103,26 @@ export function getEnv(): Env {
 
   cached = parsed.data;
   return cached;
+}
+
+/**
+ * The canonical public URL of the customer-facing web app. Use this —
+ * never `WEB_ORIGIN[0]` — when building user-facing links inside emails,
+ * webhooks, redirect Locations, or anything a real human will click.
+ *
+ *   - Preferred source: WEB_PUBLIC_URL (a single canonical URL)
+ *   - Backwards-compatible fallback: the first entry of WEB_ORIGIN.
+ *     This is fragile (CORS lists are reorderable and may include
+ *     preview URLs) — kept only so existing deploys don't 500 before
+ *     the operator can set WEB_PUBLIC_URL.
+ *   - Dev fallback: http://localhost:3000 keeps the boot path quiet
+ *     when nothing has been configured yet.
+ *
+ * Never returns a trailing slash. Safe to concatenate with paths
+ * starting in `/`.
+ */
+export function publicWebUrl(): string {
+  const env = getEnv();
+  const raw = env.WEB_PUBLIC_URL ?? env.WEB_ORIGIN[0] ?? "http://localhost:3000";
+  return raw.replace(/\/+$/, "");
 }
