@@ -13,7 +13,7 @@ import {
 } from "@prisma/client";
 import type Stripe from "stripe";
 
-import { getEnv } from "../../config/env";
+import { publicWebUrl } from "../../config/env";
 import { TurnstileService } from "../contact/turnstile.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
@@ -135,8 +135,7 @@ export class GiftingService {
       include: { items: true },
     });
 
-    const env = getEnv();
-    const origin = env.WEB_ORIGIN[0] ?? "http://localhost:3000";
+    const origin = publicWebUrl();
 
     const session = await this.stripe.sdk.checkout.sessions.create({
       mode: "payment",

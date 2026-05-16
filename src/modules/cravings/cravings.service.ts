@@ -14,7 +14,7 @@ import {
 } from "@prisma/client";
 import type Stripe from "stripe";
 
-import { getEnv } from "../../config/env";
+import { publicWebUrl } from "../../config/env";
 import {
   indulgenceCreditsIssuedTemplate,
   indulgenceWelcomeTemplate,
@@ -104,8 +104,7 @@ export class CravingsService {
     // Reuse-or-create a Stripe customer pinned to our user.
     const customerId = await this.ensureStripeCustomer(user);
 
-    const env = getEnv();
-    const origin = env.WEB_ORIGIN[0] ?? "http://localhost:3000";
+    const origin = publicWebUrl();
 
     const session = await this.stripe.sdk.checkout.sessions.create({
       mode: "subscription",
@@ -141,8 +140,7 @@ export class CravingsService {
     const sub = await this.db.subscription.findUnique({ where: { userId } });
     if (!sub) throw new NotFoundException();
 
-    const env = getEnv();
-    const origin = env.WEB_ORIGIN[0] ?? "http://localhost:3000";
+    const origin = publicWebUrl();
 
     const portal = await this.stripe.sdk.billingPortal.sessions.create({
       customer: sub.stripeCustomerId,
@@ -444,7 +442,7 @@ export class CravingsService {
             firstName: firstNameOf(user.name) ?? user.name,
             amountMinor: invoice.amount_paid,
             balanceMinor: result.balanceAfter,
-            accountUrl: `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/account/subscription`,
+            accountUrl: `${publicWebUrl()}/account/subscription`,
           });
           await this.mailer.send({
             to: user.email,
@@ -647,7 +645,7 @@ export class CravingsService {
     const tpl = indulgenceWelcomeTemplate({
       firstName: firstNameOf(user.name) ?? user.name,
       monthlyAmountMinor: opts.monthlyAmountMinor,
-      accountUrl: `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/account/subscription`,
+      accountUrl: `${publicWebUrl()}/account/subscription`,
     });
 
     await this.mailer.send({

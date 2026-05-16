@@ -6,7 +6,7 @@ import {
 } from "@nestjs/common";
 import { ContactKind, ContactStatus } from "@prisma/client";
 
-import { getEnv } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
 import { MailerService } from "../mailer/mailer.service";
 import {
   contactAckTemplate,
@@ -76,7 +76,7 @@ export class ContactService {
         this.logger.error({ err, enquiryId: enquiry.id }, "Failed to send acknowledgement");
       }
 
-      const adminUrl = `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/admin/enquiries/${enquiry.id}`;
+      const adminUrl = `${publicWebUrl()}/admin/enquiries/${enquiry.id}`;
       try {
         const notifyTpl = contactNotifyTemplate({
           enquiryId: enquiry.id,

@@ -7,7 +7,7 @@ import {
 import { JwtService } from "@nestjs/jwt";
 import { NewsletterStatus } from "@prisma/client";
 
-import { getEnv } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
 import { TurnstileService } from "../contact/turnstile.service";
 import { MailerService } from "../mailer/mailer.service";
 import { newsletterConfirmTemplate } from "../mailer/newsletter-templates";
@@ -100,7 +100,7 @@ export class NewsletterService {
       { secret: getEnv().JWT_SECRET, expiresIn: CONFIRM_TTL, issuer: "nimi" },
     );
 
-    const url = `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/newsletter/confirm?token=${token}`;
+    const url = `${publicWebUrl()}/newsletter/confirm?token=${token}`;
     const tpl = newsletterConfirmTemplate({ url });
     try {
       await this.mailer.send({ to: email, ...tpl, tag: "newsletter-confirm" });

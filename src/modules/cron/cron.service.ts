@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { SubscriptionStatus } from "@prisma/client";
 
-import { getEnv } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
 import {
   indulgenceBirthdayTemplate,
   indulgenceCreditsReminderTemplate,
@@ -98,7 +98,7 @@ export class CronService {
           firstName: firstNameOf(u.name) ?? u.name,
           promoCode: "NIMIBDAY",
           validDays: 7,
-          accountUrl: `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/cravings`,
+          accountUrl: `${publicWebUrl()}/cravings`,
         });
         await this.mailer.send({ to: u.email, ...tpl, tag: "indulgence-birthday" });
 
@@ -193,7 +193,7 @@ export class CronService {
         const tpl = indulgenceCreditsReminderTemplate({
           firstName: firstNameOf(sub.user.name) ?? sub.user.name,
           balanceMinor: balance,
-          accountUrl: `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/account/subscription`,
+          accountUrl: `${publicWebUrl()}/account/subscription`,
         });
         await this.mailer.send({
           to: sub.user.email,

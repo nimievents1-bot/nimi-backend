@@ -13,7 +13,7 @@ import {
 } from "@prisma/client";
 import type Stripe from "stripe";
 
-import { getEnv } from "../../config/env";
+import { publicWebUrl } from "../../config/env";
 import { MailerService } from "../mailer/mailer.service";
 import {
   PastryCartService,
@@ -97,8 +97,7 @@ export class PastryOrdersService {
     const payable = view.payableMinor;
     const reference = await this.allocateReference();
 
-    const env = getEnv();
-    const origin = env.WEB_ORIGIN[0] ?? "http://localhost:3000";
+    const origin = publicWebUrl();
 
     // Snapshot every cart line into a JSON-serialisable shape we can
     // store in PastryOrderItem.itemSnapshot, decoupling the order from
@@ -671,8 +670,7 @@ We'll be in touch when it's prepared. Thank you for ordering with us.
    * payment-confirmed mail; PENDING_PAYMENT is internal-only.
    */
   private async dispatchStatusEmail(order: PastryOrder): Promise<void> {
-    const env = getEnv();
-    const accountUrl = `${env.WEB_ORIGIN[0] ?? "http://localhost:3000"}/account/orders`;
+    const accountUrl = `${publicWebUrl()}/account/orders`;
     const firstName = order.name.split(" ")[0] ?? order.name;
 
     let subject: string | undefined;

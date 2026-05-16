@@ -6,7 +6,7 @@ import {
 } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 
-import { getEnv } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
 import { MailerService } from "../mailer/mailer.service";
 import {
   passwordResetTemplate,
@@ -103,7 +103,7 @@ export class AuthService {
       data: { userId, hash, expiresAt },
     });
 
-    const url = `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/verify-email?token=${token}`;
+    const url = `${publicWebUrl()}/verify-email?token=${token}`;
     const tpl = verifyEmailTemplate({ recipientName: name, url });
     try {
       await this.mailer.send({ to: email, ...tpl, tag: "verify-email" });
@@ -267,7 +267,7 @@ export class AuthService {
         },
       });
 
-      const url = `${getEnv().WEB_ORIGIN[0] ?? "http://localhost:3000"}/reset-password?token=${token}`;
+      const url = `${publicWebUrl()}/reset-password?token=${token}`;
       const tpl = passwordResetTemplate({ recipientName: user.name, url, ip: meta.ip });
       try {
         await this.mailer.send({ to: user.email, ...tpl, tag: "password-reset" });
