@@ -95,6 +95,25 @@ export class AdminCravingsController {
     return this.cravings.listAllPlansForAdmin();
   }
 
+  @Get("plans/:slug")
+  async getPlan(@Param("slug") slug: string) {
+    // Single-plan getter for the admin tier editor. Returns hidden
+    // plans too so the operator can re-activate them. The response
+    // includes `stripePriceId` / `stripeProductId` so the editor can
+    // flag a re-publish when the operator changes the price.
+    const plan = await this.cravings.getPlanBySlugForAdmin(slug);
+    return {
+      slug: plan.slug,
+      name: plan.name,
+      description: plan.description,
+      monthlyAmountMinor: plan.monthlyAmountMinor,
+      currency: plan.currency,
+      position: plan.position,
+      active: plan.active,
+      stripeReady: Boolean(plan.stripePriceId),
+    };
+  }
+
   @Post("plans")
   async upsertPlan(@Body() dto: UpsertCravingsPlanDto) {
     return this.cravings.upsertPlan(dto);

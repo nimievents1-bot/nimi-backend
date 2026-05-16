@@ -178,6 +178,19 @@ export class CravingsService implements OnModuleInit {
   }
 
   /**
+   * Admin-only getter that returns ANY plan by slug — active or hidden —
+   * so the admin tier editor can pre-fill the form even for plans the
+   * operator has chosen to hide from /cravings. Never call from a public
+   * route: leaks the `stripePriceId` and `stripeProductId` which are
+   * internal-only.
+   */
+  async getPlanBySlugForAdmin(slug: string): Promise<CravingsPlan> {
+    const row = await this.db.cravingsPlan.findUnique({ where: { slug } });
+    if (!row) throw new NotFoundException();
+    return row;
+  }
+
+  /**
    * Admin-facing listing of every plan in the catalog, including hidden
    * tiers and tiers that haven't been wired to a Stripe Price yet.
    * The boolean `stripeReady` lets the admin UI render a one-click
