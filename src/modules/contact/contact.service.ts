@@ -113,4 +113,66 @@ export class ContactService {
     }
     return this.db.contactEnquiry.findMany({ orderBy: { createdAt: "desc" } });
   }
+
+  /**
+   * Customer self-service listing. Returns every non-SPAM enquiry whose
+   * `email` matches the signed-in user's account email. We deliberately
+   * compare case-insensitively because email addresses are case-folded
+   * for routing purposes — a customer who typed "Jane@x.com" on the
+   * form and later signed up as "jane@x.com" should see their own
+   * submissions. The query is bounded by the existing `@@index([email])`
+   * on ContactEnquiry, so it stays fast as the inbox grows.
+   *
+   * We surface only the fields a customer should see: the kind (catering
+   * vs events), the current status, the date, the original notes, and
+   * the event metadata they filled in. Admin-only fields (`internalNotes`,
+   * `handledBy`, `ip`, `userAgent`) are NEVER returned from this method.
+   */
+  async listForCustomer(email: string): Promise<
+    Array<{
+      id: string;
+      kind: ContactKind;
+      status: ContactStatus;
+      notes: string;
+      eventDate: string | null;
+      eventType: string | null;
+      guestCount: number | null;
+      budgetBand: string | null;
+      createdAt: string;
+      updatedAt: string;
+    }>
+  > {
+    const rows = await this.db.contactEnquiry.findMany({
+      where: {
+        email: { equals: email.toLowerCase().trim(), mode: "insensitive" },
+        status: { not: ContactStatus.SPAM },
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        kind: true,
+        status: true,
+        notes: true,
+        eventDate: true,
+        eventType: true,
+        guestCount: true,
+        budgetBand: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      notes: row.notes,
+      eventDate: row.eventDate ? row.eventDate.toISOString() : null,
+      eventType: row.eventType,
+      guestCount: row.guestCount,
+      budgetBand: row.budgetBand,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    }));
+  }
 }
