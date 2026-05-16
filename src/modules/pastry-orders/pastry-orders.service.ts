@@ -250,23 +250,74 @@ export class PastryOrdersService {
     // typed HttpException with an actionable message — without this, a
     // raw StripeError would fall through to the generic 500 handler and
     // the customer would only see "An unexpected error occurred."
+    // Defensive URL validation. Stripe rejects the entire session if
+    // ANY URL (success_url, cancel_url, or any image in line_items) is
+    // malformed — and the rejection looks like a plain `Error: Not a
+    // valid URL` rather than a typed StripeInvalidRequestError, so it
+    // used to surface as "Payment setup failed". We validate every URL
+    // up-front and drop bad image URLs (the product line still ships,
+    // it just renders without an image on Stripe's page). For the
+    // success/cancel URLs we hard-fail here with a typed exception —
+    // the page can't function without them, but at least the operator
+    // sees a precise message telling them what to fix.
+    const isValidHttpUrl = (value: string): boolean => {
+      try {
+        const u = new URL(value);
+        return u.protocol === "https:" || u.protocol === "http:";
+      } catch {
+        return false;
+      }
+    };
+
+    const successUrl = `${origin}/cart/success?order=${reference}&session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${origin}/cart?status=cancelled`;
+    // Strip Stripe's `{CHECKOUT_SESSION_ID}` placeholder before
+    // running through URL() — the parser doesn't accept curly braces.
+    if (!isValidHttpUrl(successUrl.replace("{CHECKOUT_SESSION_ID}", "x"))) {
+      this.logger.error(
+        { successUrl, cancelUrl, origin, orderId: order.id, reference },
+        "Computed success/cancel URL is not a valid http(s) URL — check WEB_PUBLIC_URL / WEB_ORIGIN env",
+      );
+      await this.db.pastryOrder
+        .update({ where: { id: order.id }, data: { status: PastryOrderStatus.CANCELLED } })
+        .catch(() => undefined);
+      throw new ServiceUnavailableException(
+        "Checkout is misconfigured on the server (WEB_PUBLIC_URL must be a full https:// URL). The site administrator has been notified.",
+      );
+    }
+
+    // Build line items, silently dropping image URLs that don't pass
+    // the URL guard so a single bad upload can't block the whole
+    // checkout. The product still appears on Stripe's checkout — just
+    // without the image thumbnail.
+    const lineItems = view.lines.map((line) => {
+      const validImage = line.imageUrl && isValidHttpUrl(line.imageUrl) ? line.imageUrl : null;
+      if (line.imageUrl && !validImage) {
+        this.logger.warn(
+          { pastryItemId: line.itemId, imageUrl: line.imageUrl },
+          "Dropping invalid imageUrl from Stripe Checkout line item",
+        );
+      }
+      return {
+        quantity: line.quantity,
+        price_data: {
+          currency: view.currency,
+          unit_amount: line.unitPriceMinor,
+          product_data: {
+            name: line.name,
+            ...(line.description ? { description: line.description.slice(0, 200) } : {}),
+            ...(validImage ? { images: [validImage] } : {}),
+          },
+        },
+      } satisfies Stripe.Checkout.SessionCreateParams.LineItem;
+    });
+
     let session: Stripe.Checkout.Session;
     try {
       session = await this.stripe.sdk.checkout.sessions.create({
         mode: "payment",
         customer_email: user.email,
-        line_items: view.lines.map((line) => ({
-          quantity: line.quantity,
-          price_data: {
-            currency: view.currency,
-            unit_amount: line.unitPriceMinor,
-            product_data: {
-              name: line.name,
-              ...(line.description ? { description: line.description.slice(0, 200) } : {}),
-              ...(line.imageUrl ? { images: [line.imageUrl] } : {}),
-            },
-          },
-        })),
+        line_items: lineItems,
         // Communicate the credit applied as a discount line so the customer
         // sees the math on Stripe's checkout page.
         ...(couponId ? { discounts: [{ coupon: couponId }] } : {}),
@@ -284,8 +335,8 @@ export class PastryOrdersService {
             reference,
           },
         },
-        success_url: `${origin}/cart/success?order=${reference}&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin}/cart?status=cancelled`,
+        success_url: successUrl,
+        cancel_url: cancelUrl,
       });
     } catch (err) {
       // Log everything we can correlate against Stripe Dashboard.
