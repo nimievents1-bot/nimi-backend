@@ -44,6 +44,12 @@ export class CravingsController {
       monthlyAmountMinor: p.monthlyAmountMinor,
       currency: p.currency,
       position: p.position,
+      // True only when the plan has a live Stripe Price ID. The web UI
+      // uses this to render a disabled "Coming soon" state instead of
+      // a "Join the club" button that would 503. We expose just the
+      // boolean — never the Price ID itself — so the public response
+      // doesn't leak Stripe internals.
+      stripeReady: Boolean(p.stripePriceId),
     }));
   }
 
@@ -78,6 +84,16 @@ export class CravingsController {
 @Roles("OWNER", "EDITOR")
 export class AdminCravingsController {
   constructor(private readonly cravings: CravingsService) {}
+
+  @Get("plans")
+  async listAllPlans() {
+    // Returns every CravingsPlan row — active and inactive — so the admin
+    // can see which tiers are seeded, which are wired to Stripe, and
+    // which still need publishing. Mirrors the schema fields exposed to
+    // the upsert DTO so the "Publish to Stripe" button can echo them
+    // straight back without a lookup.
+    return this.cravings.listAllPlansForAdmin();
+  }
 
   @Post("plans")
   async upsertPlan(@Body() dto: UpsertCravingsPlanDto) {

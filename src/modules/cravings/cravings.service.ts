@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  type OnModuleInit,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import {
@@ -62,8 +63,52 @@ const CREDIT_GRACE_MONTHS = 12;
  *   - Status transitions go through `applySubscriptionEvent` which mirrors
  *     Stripe state — Stripe is the source of truth.
  */
+/**
+ * Default Indulgence Club tiers seeded on first boot.
+ *
+ * These match the three tiers shown on the marketing /cravings page
+ * (£25 / £50 / £100) so the customer-facing UI and the database are
+ * coherent from the moment the API comes up. The rows are seeded with
+ * `stripePriceId = null` — the admin must run an upsert through
+ * `POST /admin/cravings/plans` (or set STRIPE_SECRET_KEY before first
+ * boot) to wire each tier to a real Stripe Price. Until then, the
+ * subscribe endpoint refuses with a 503 and the UI shows "Coming soon".
+ *
+ * Slugs are stable and used in Stripe metadata; do not rename them
+ * after Stripe products have been created or webhooks will mis-route.
+ */
+const DEFAULT_CRAVINGS_PLANS: ReadonlyArray<{
+  slug: string;
+  name: string;
+  description: string;
+  monthlyAmountMinor: number;
+  position: number;
+}> = [
+  {
+    slug: "cravings-25",
+    name: "£25 / month",
+    description: "A weekly treat — perfect for individuals.",
+    monthlyAmountMinor: 2500,
+    position: 1,
+  },
+  {
+    slug: "cravings-50",
+    name: "£50 / month",
+    description: "The sweet spot for households and small offices.",
+    monthlyAmountMinor: 5000,
+    position: 2,
+  },
+  {
+    slug: "cravings-100",
+    name: "£100 / month",
+    description: "For frequent celebrations and bigger teams.",
+    monthlyAmountMinor: 10000,
+    position: 3,
+  },
+];
+
 @Injectable()
-export class CravingsService {
+export class CravingsService implements OnModuleInit {
   private readonly logger = new Logger(CravingsService.name);
 
   constructor(
@@ -71,6 +116,51 @@ export class CravingsService {
     private readonly stripe: StripeService,
     private readonly mailer: MailerService,
   ) {}
+
+  /**
+   * Seed the three default Indulgence Club tiers if the table is empty.
+   * Runs once per boot. Idempotent: if any plan exists the seeder is a
+   * no-op, so the admin can rename or hide rows without them coming
+   * back on the next deploy.
+   *
+   * Stripe wiring is intentionally NOT done here. Two reasons:
+   *   1. Boot must succeed even when STRIPE_SECRET_KEY is unset.
+   *   2. The Stripe Product/Price creation is non-idempotent across
+   *      modes (test vs live) — the admin should make that call
+   *      explicitly via the upsert endpoint, which already handles
+   *      reuse + price-change archival cleanly.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const existing = await this.db.cravingsPlan.count();
+      if (existing > 0) return;
+
+      await this.db.cravingsPlan.createMany({
+        data: DEFAULT_CRAVINGS_PLANS.map((p) => ({
+          slug: p.slug,
+          name: p.name,
+          description: p.description,
+          monthlyAmountMinor: p.monthlyAmountMinor,
+          currency: "gbp",
+          position: p.position,
+          active: true,
+          stripeProductId: null,
+          stripePriceId: null,
+        })),
+        skipDuplicates: true,
+      });
+
+      this.logger.log(
+        `Seeded ${DEFAULT_CRAVINGS_PLANS.length} default Indulgence Club tiers ` +
+          "(Stripe Price IDs pending — admin must publish via /admin/cravings/plans).",
+      );
+    } catch (err) {
+      // Never let a seeding failure prevent the API from booting. The
+      // marketing page falls back to an empty state if the table really
+      // is empty, so customers see "Coming soon" rather than a crash.
+      this.logger.error({ err }, "Failed to seed default Indulgence Club tiers");
+    }
+  }
 
   // ---------- public catalog ----------
 
@@ -85,6 +175,40 @@ export class CravingsService {
     const row = await this.db.cravingsPlan.findUnique({ where: { slug } });
     if (!row || !row.active) throw new NotFoundException();
     return row;
+  }
+
+  /**
+   * Admin-facing listing of every plan in the catalog, including hidden
+   * tiers and tiers that haven't been wired to a Stripe Price yet.
+   * The boolean `stripeReady` lets the admin UI render a one-click
+   * "Publish to Stripe" affordance for tiers that need finalising.
+   * Never call from a public route — exposes operational state.
+   */
+  async listAllPlansForAdmin(): Promise<
+    Array<{
+      slug: string;
+      name: string;
+      description: string | null;
+      monthlyAmountMinor: number;
+      currency: string;
+      position: number;
+      active: boolean;
+      stripeReady: boolean;
+    }>
+  > {
+    const rows = await this.db.cravingsPlan.findMany({
+      orderBy: [{ position: "asc" }, { monthlyAmountMinor: "asc" }],
+    });
+    return rows.map((p) => ({
+      slug: p.slug,
+      name: p.name,
+      description: p.description,
+      monthlyAmountMinor: p.monthlyAmountMinor,
+      currency: p.currency,
+      position: p.position,
+      active: p.active,
+      stripeReady: Boolean(p.stripePriceId),
+    }));
   }
 
   // ---------- subscribe ----------
