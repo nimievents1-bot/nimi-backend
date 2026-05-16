@@ -211,49 +211,108 @@ export class PastryOrdersService {
       select: { id: true },
     });
 
-    const session = await this.stripe.sdk.checkout.sessions.create({
-      mode: "payment",
-      customer_email: user.email,
-      line_items: view.lines.map((line) => ({
-        quantity: line.quantity,
-        price_data: {
-          currency: view.currency,
-          unit_amount: line.unitPriceMinor,
-          product_data: {
-            name: line.name,
-            ...(line.description ? { description: line.description.slice(0, 200) } : {}),
-            ...(line.imageUrl ? { images: [line.imageUrl] } : {}),
+    // Pre-create the credit coupon (if any) BEFORE the sessions.create call
+    // so a coupon failure surfaces as its own typed error and doesn't get
+    // tangled in the session-creation try/catch.
+    const couponId = creditApplied > 0
+      ? await this.ensureSessionCoupon(creditApplied, view.currency).catch((err: unknown) => {
+          this.logger.error(
+            { err, orderId: order.id, creditApplied, currency: view.currency },
+            "Failed to create Stripe credit coupon",
+          );
+          throw new ServiceUnavailableException(
+            "We couldn't apply your Indulgence Credit. Please try again in a moment.",
+          );
+        })
+      : null;
+
+    // Wrap the Stripe session create so any provider failure becomes a
+    // typed HttpException with an actionable message — without this, a
+    // raw StripeError would fall through to the generic 500 handler and
+    // the customer would only see "An unexpected error occurred."
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await this.stripe.sdk.checkout.sessions.create({
+        mode: "payment",
+        customer_email: user.email,
+        line_items: view.lines.map((line) => ({
+          quantity: line.quantity,
+          price_data: {
+            currency: view.currency,
+            unit_amount: line.unitPriceMinor,
+            product_data: {
+              name: line.name,
+              ...(line.description ? { description: line.description.slice(0, 200) } : {}),
+              ...(line.imageUrl ? { images: [line.imageUrl] } : {}),
+            },
           },
-        },
-      })),
-      // Communicate the credit applied as a discount line so the customer
-      // sees the math on Stripe's checkout page.
-      ...(creditApplied > 0
-        ? {
-            discounts: [
-              {
-                coupon: await this.ensureSessionCoupon(creditApplied, view.currency),
-              },
-            ],
-          }
-        : {}),
-      metadata: {
-        kind: "pastry_order",
-        orderId: order.id,
-        reference,
-        userId: user.id,
-        creditApplied: String(creditApplied),
-      },
-      payment_intent_data: {
+        })),
+        // Communicate the credit applied as a discount line so the customer
+        // sees the math on Stripe's checkout page.
+        ...(couponId ? { discounts: [{ coupon: couponId }] } : {}),
         metadata: {
           kind: "pastry_order",
           orderId: order.id,
           reference,
+          userId: user.id,
+          creditApplied: String(creditApplied),
         },
-      },
-      success_url: `${origin}/cart/success?order=${reference}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/cart?status=cancelled`,
-    });
+        payment_intent_data: {
+          metadata: {
+            kind: "pastry_order",
+            orderId: order.id,
+            reference,
+          },
+        },
+        success_url: `${origin}/cart/success?order=${reference}&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}/cart?status=cancelled`,
+      });
+    } catch (err) {
+      // Log everything we can correlate against Stripe Dashboard.
+      this.logger.error(
+        {
+          err,
+          errName: (err as Error)?.name,
+          errMessage: (err as Error)?.message,
+          orderId: order.id,
+          reference,
+          subtotalMinor,
+          creditApplied,
+          payable,
+          currency: view.currency,
+          lineCount: view.lines.length,
+        },
+        "Stripe Checkout session create failed",
+      );
+
+      // Best-effort: mark the pending order as cancelled so it doesn't
+      // sit in PENDING_PAYMENT forever. Webhook-driven reconciliation
+      // would also clean this up eventually, but a sync cancel keeps
+      // the admin pastry-orders list tidy.
+      await this.db.pastryOrder
+        .update({ where: { id: order.id }, data: { status: PastryOrderStatus.CANCELLED } })
+        .catch(() => undefined);
+
+      // Translate common Stripe failure modes into wording the customer
+      // can act on. The full error remains in logs for the operator.
+      const name = (err as Error)?.name ?? "";
+      if (name === "StripeAuthenticationError") {
+        throw new ServiceUnavailableException(
+          "Payments aren't available right now. The site administrator has been notified.",
+        );
+      }
+      if (name === "StripeInvalidRequestError") {
+        // Most often: invalid image URL, currency mismatch, or a missing
+        // dashboard configuration. We don't surface raw Stripe text
+        // because it often contains internal IDs.
+        throw new ServiceUnavailableException(
+          "We couldn't set up the payment for this order. Please refresh the page and try again.",
+        );
+      }
+      throw new ServiceUnavailableException(
+        "Our payment provider didn't respond as expected. Please wait a moment and try again.",
+      );
+    }
 
     if (!session.url) {
       throw new ServiceUnavailableException("Stripe didn't return a checkout URL.");
