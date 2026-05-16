@@ -289,11 +289,21 @@ export class PastryOrdersService {
       });
     } catch (err) {
       // Log everything we can correlate against Stripe Dashboard.
+      // `err.cause` and `err.code` aren't standard on Error but the
+      // Stripe SDK and Node's undici fetch sometimes set them, and
+      // they're the most useful signals when an error has a useless
+      // name like "Error". We also dump the constructor name in case
+      // the SDK is shipping a custom class without setting `name`.
+      const e = err as Error & { cause?: unknown; code?: unknown };
       this.logger.error(
         {
           err,
-          errName: (err as Error)?.name,
-          errMessage: (err as Error)?.message,
+          errName: e?.name,
+          errMessage: e?.message,
+          errCode: e?.code,
+          errCause: e?.cause,
+          errCtor: e?.constructor?.name,
+          stack: e?.stack,
           orderId: order.id,
           reference,
           subtotalMinor,
@@ -379,10 +389,12 @@ export class PastryOrdersService {
       // Not a Stripe error at all — most likely the StripeService
       // sdk getter threw because the client was never initialised
       // (STRIPE_SECRET_KEY truly missing), or some upstream library
-      // threw. Surface the name so the operator can identify it
-      // without searching logs.
+      // threw. Surface BOTH the name and the message so the operator
+      // can identify the failure without searching logs. We trim the
+      // message to keep the response readable.
+      const trimmed = errMessage.length > 200 ? errMessage.slice(0, 200) + "…" : errMessage;
       throw new ServiceUnavailableException(
-        `Payment setup failed: ${errName}. Please refresh and try again — if the problem persists the site administrator can read the full error in the API logs.`,
+        `Payment setup failed (${errName}): ${trimmed || "no error message"}. The site administrator can read the full error in the API logs.`,
       );
     }
 
