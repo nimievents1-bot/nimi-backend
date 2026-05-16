@@ -13,7 +13,7 @@ import {
 } from "@prisma/client";
 import type Stripe from "stripe";
 
-import { publicWebUrl } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
 import { MailerService } from "../mailer/mailer.service";
 import {
   PastryCartService,
@@ -23,6 +23,24 @@ import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
 
 import { type StartPastryCheckoutDto } from "./dto/checkout.dto";
+
+/**
+ * Minimal HTML escaper for values we splice into the admin-notification
+ * email body. The mailer doesn't interpolate templates for this module
+ * (no templating engine on the API side for pastry-order emails — see
+ * `sendPaidEmail` for the inline pattern), so we sanitise customer-
+ * supplied strings ourselves to defeat anything like `<script>` in a
+ * name or address field. Newlines are preserved by the surrounding
+ * `white-space: pre-line` styling, not by this helper.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 interface SessionUser {
   id: string;
@@ -168,8 +186,10 @@ export class PastryOrdersService {
         return order.id;
       });
 
-      // Send confirmation email — no Stripe receipt to lean on.
-      void this.sendPaidEmail(user.email, dto.recipientName, reference, 0);
+      // Customer confirmation + admin notification. Fire-and-forget;
+      // the helper refetches the order with items so the admin email
+      // can render the full bill of materials.
+      void this.dispatchPaidNotifications(orderId);
 
       return {
         url: `${origin}/cart/success?order=${reference}`,
@@ -293,24 +313,76 @@ export class PastryOrdersService {
         .update({ where: { id: order.id }, data: { status: PastryOrderStatus.CANCELLED } })
         .catch(() => undefined);
 
-      // Translate common Stripe failure modes into wording the customer
-      // can act on. The full error remains in logs for the operator.
-      const name = (err as Error)?.name ?? "";
-      if (name === "StripeAuthenticationError") {
+      // Translate Stripe failure modes into actionable copy. The full
+      // error stays in logs (above); the user-facing message is short
+      // enough to act on but specific enough that the operator can
+      // recognise the failure mode from the surface.
+      //
+      // We deliberately include a short diagnostic suffix in the
+      // detail (the error short-code) so a customer can quote it to
+      // support and the operator can match it against the request id
+      // without log access. We strip the "Stripe" prefix and "Error"
+      // suffix so the surface is "AuthenticationError" rather than
+      // the noisier raw name.
+      const errName = (err as Error)?.name ?? "UnknownError";
+      const errMessage = (err as Error)?.message ?? "";
+      const shortCode = errName.replace(/^Stripe/, "").replace(/Error$/, "") || "Unknown";
+
+      // The Stripe SDK exposes a `type` property (lowercase, e.g.
+      // "StripeAuthenticationError" has type "authentication_error").
+      // Use it as a secondary signal when `name` isn't a Stripe* prefix.
+      const stripeType = (err as { type?: string })?.type ?? "";
+
+      const isStripe = errName.startsWith("Stripe") || stripeType.endsWith("_error");
+
+      if (errName === "StripeAuthenticationError" || stripeType === "authentication_error") {
         throw new ServiceUnavailableException(
-          "Payments aren't available right now. The site administrator has been notified.",
+          `Payments aren't available right now — the Stripe key on the server is missing or wrong. The site administrator has been notified. [${shortCode}]`,
         );
       }
-      if (name === "StripeInvalidRequestError") {
-        // Most often: invalid image URL, currency mismatch, or a missing
-        // dashboard configuration. We don't surface raw Stripe text
-        // because it often contains internal IDs.
+      if (errName === "StripePermissionError" || stripeType === "permission_error") {
         throw new ServiceUnavailableException(
-          "We couldn't set up the payment for this order. Please refresh the page and try again.",
+          `The Stripe account isn't set up to accept Checkout payments yet. The site administrator has been notified. [${shortCode}]`,
         );
       }
+      if (errName === "StripeInvalidRequestError" || stripeType === "invalid_request_error") {
+        // Most often: invalid image URL, currency mismatch, customer
+        // email malformed, or a Checkout configuration the Dashboard
+        // is rejecting. The Stripe message often names the bad field
+        // — safe-ish to surface a trimmed version because the customer
+        // can sometimes self-correct (e.g. retry).
+        const trimmedHint = errMessage.length > 140 ? errMessage.slice(0, 140) + "…" : errMessage;
+        throw new ServiceUnavailableException(
+          `We couldn't set up the payment for this order. ${trimmedHint || "Please refresh and try again."} [${shortCode}]`,
+        );
+      }
+      if (errName === "StripeRateLimitError" || stripeType === "rate_limit_error") {
+        throw new ServiceUnavailableException(
+          `Too many checkout attempts in a short window. Please wait a minute and try again. [${shortCode}]`,
+        );
+      }
+      if (errName === "StripeConnectionError" || stripeType === "api_connection_error") {
+        throw new ServiceUnavailableException(
+          `We couldn't reach Stripe just now. Please try again in a moment. [${shortCode}]`,
+        );
+      }
+      if (errName === "StripeAPIError" || stripeType === "api_error") {
+        throw new ServiceUnavailableException(
+          `Stripe is having an issue on their end. Please try again shortly. [${shortCode}]`,
+        );
+      }
+      if (isStripe) {
+        throw new ServiceUnavailableException(
+          `Our payment provider returned an error. Please wait a moment and try again. [${shortCode}]`,
+        );
+      }
+      // Not a Stripe error at all — most likely the StripeService
+      // sdk getter threw because the client was never initialised
+      // (STRIPE_SECRET_KEY truly missing), or some upstream library
+      // threw. Surface the name so the operator can identify it
+      // without searching logs.
       throw new ServiceUnavailableException(
-        "Our payment provider didn't respond as expected. Please wait a moment and try again.",
+        `Payment setup failed: ${errName}. Please refresh and try again — if the problem persists the site administrator can read the full error in the API logs.`,
       );
     }
 
@@ -408,7 +480,9 @@ export class PastryOrdersService {
       await this.cart.clearForCheckout(order.userId, tx);
     });
 
-    void this.sendPaidEmail(order.email, order.name, order.reference, order.totalMinor);
+    // Customer confirmation + admin notification — the helper refetches
+    // with items so the admin email can render the full bill of materials.
+    void this.dispatchPaidNotifications(order.id);
   }
 
   // ---------- customer reads ----------
@@ -680,6 +754,185 @@ export class PastryOrdersService {
       name: `Indulgence Credit (${currency.toUpperCase()} ${(amountMinor / 100).toFixed(2)})`,
     });
     return coupon.id;
+  }
+
+  /**
+   * Fire-and-forget dispatcher for the two notifications that go out
+   * the moment an order moves to PAID:
+   *
+   *   1. **Customer confirmation** — so they have the reference in
+   *      their inbox even if Stripe's receipt lands in spam.
+   *   2. **Admin notification** — sent to the support inbox so the
+   *      kitchen sees the order without having to keep the admin
+   *      dashboard open. Includes the reference, customer details,
+   *      itemised totals, shipping address, kitchen notes, and a
+   *      one-click link to the admin order detail page.
+   *
+   * Both emails are non-blocking; failures are logged and swallowed so
+   * a transient mail-provider hiccup doesn't reverse a successful
+   * payment. Called from BOTH the credits-only path (in `startCheckout`)
+   * AND the Stripe webhook handler (`onCheckoutCompleted`).
+   *
+   * The function refetches the order with its line items + snapshots so
+   * the admin email can render the bill of materials without callers
+   * having to pre-load that data.
+   */
+  private async dispatchPaidNotifications(orderId: string): Promise<void> {
+    let order;
+    try {
+      order = await this.db.pastryOrder.findUnique({
+        where: { id: orderId },
+        include: {
+          items: {
+            orderBy: { createdAt: "asc" },
+            select: {
+              quantity: true,
+              unitPriceMinor: true,
+              totalMinor: true,
+              itemSnapshot: true,
+            },
+          },
+        },
+      });
+    } catch (err) {
+      this.logger.error({ err, orderId }, "Failed to load order for paid notifications");
+      return;
+    }
+    if (!order) {
+      this.logger.warn({ orderId }, "Order vanished before paid notifications could be sent");
+      return;
+    }
+
+    void this.sendPaidEmail(order.email, order.name, order.reference, order.totalMinor);
+    void this.sendAdminPaidEmail(order);
+  }
+
+  /**
+   * Admin-facing notification when a pastry order is paid. Sent to the
+   * `SUPPORT_INBOX` configured in env, with `Reply-To` set to the
+   * customer's email so a one-tap reply opens a real conversation.
+   * Includes the deep-link to the admin order page so the kitchen
+   * doesn't have to navigate the dashboard from scratch.
+   */
+  private async sendAdminPaidEmail(order: {
+    reference: string;
+    email: string;
+    name: string;
+    phone: string | null;
+    totalMinor: number;
+    subtotalMinor: number;
+    creditAppliedMinor: number;
+    currency: string;
+    shippingLine1: string;
+    shippingLine2: string | null;
+    shippingCity: string;
+    shippingPostcode: string;
+    shippingCountry: string;
+    notes: string | null;
+    items: Array<{
+      quantity: number;
+      unitPriceMinor: number;
+      totalMinor: number;
+      itemSnapshot: Prisma.JsonValue;
+    }>;
+  }): Promise<void> {
+    try {
+      const env = getEnv();
+      const adminUrl = `${publicWebUrl()}/admin/pastry-orders/${order.reference}`;
+      const fmt = (minor: number) =>
+        `${order.currency.toUpperCase()} ${(minor / 100).toFixed(2)}`;
+
+      // Item lines for both the plain-text body and the HTML body.
+      // We deliberately read `itemSnapshot.name` (the name as it was at
+      // order time) rather than joining against PastryItem — so an
+      // admin who later renamed an item still sees what was ordered.
+      const itemRows = order.items.map((line) => {
+        const snap = (line.itemSnapshot ?? {}) as { name?: string; slug?: string };
+        const name = snap.name ?? snap.slug ?? "(unknown item)";
+        return {
+          name,
+          quantity: line.quantity,
+          unitPrice: fmt(line.unitPriceMinor),
+          lineTotal: fmt(line.totalMinor),
+        };
+      });
+
+      const itemsText = itemRows
+        .map((r) => `  - ${r.quantity} × ${r.name} @ ${r.unitPrice} = ${r.lineTotal}`)
+        .join("\n");
+
+      const itemsHtml = itemRows
+        .map(
+          (r) =>
+            `<tr><td style="padding:4px 8px">${r.quantity} × ${escapeHtml(r.name)}</td><td style="padding:4px 8px;text-align:right">${r.unitPrice}</td><td style="padding:4px 8px;text-align:right">${r.lineTotal}</td></tr>`,
+        )
+        .join("");
+
+      const totalsBlock = `Subtotal: ${fmt(order.subtotalMinor)}
+${order.creditAppliedMinor > 0 ? `Indulgence Credit: −${fmt(order.creditAppliedMinor)}\n` : ""}Total paid: ${fmt(order.totalMinor)}`;
+
+      const text = `New pastry order — ${order.reference}
+
+Customer: ${order.name} <${order.email}>${order.phone ? ` · ${order.phone}` : ""}
+
+Items:
+${itemsText}
+
+${totalsBlock}
+
+Deliver to:
+${order.shippingLine1}
+${order.shippingLine2 ? `${order.shippingLine2}\n` : ""}${order.shippingCity} ${order.shippingPostcode}
+${order.shippingCountry}
+
+${order.notes ? `Notes for the kitchen:\n${order.notes}\n\n` : ""}Open in admin: ${adminUrl}
+
+— Nimi Events`;
+
+      const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#1c1917;max-width:560px">
+  <h2 style="margin:0 0 12px;color:#5C1F18">New pastry order — ${order.reference}</h2>
+  <p style="margin:0 0 8px"><strong>${escapeHtml(order.name)}</strong> &lt;${escapeHtml(order.email)}&gt;${order.phone ? ` · ${escapeHtml(order.phone)}` : ""}</p>
+
+  <h3 style="margin:16px 0 4px">Items</h3>
+  <table style="border-collapse:collapse;width:100%;font-size:14px;border:1px solid #e7e5e4">
+    <thead><tr style="background:#FBF7EB"><th style="text-align:left;padding:4px 8px">Item</th><th style="text-align:right;padding:4px 8px">Unit</th><th style="text-align:right;padding:4px 8px">Line</th></tr></thead>
+    <tbody>${itemsHtml}</tbody>
+  </table>
+
+  <h3 style="margin:16px 0 4px">Totals</h3>
+  <p style="margin:0;font-size:14px">
+    Subtotal: ${fmt(order.subtotalMinor)}<br>
+    ${order.creditAppliedMinor > 0 ? `Indulgence Credit: −${fmt(order.creditAppliedMinor)}<br>` : ""}
+    <strong>Total paid: ${fmt(order.totalMinor)}</strong>
+  </p>
+
+  <h3 style="margin:16px 0 4px">Deliver to</h3>
+  <p style="margin:0;font-size:14px">
+    ${escapeHtml(order.shippingLine1)}<br>
+    ${order.shippingLine2 ? `${escapeHtml(order.shippingLine2)}<br>` : ""}
+    ${escapeHtml(order.shippingCity)} ${escapeHtml(order.shippingPostcode)}<br>
+    ${escapeHtml(order.shippingCountry)}
+  </p>
+
+  ${order.notes ? `<h3 style="margin:16px 0 4px">Notes for the kitchen</h3><p style="margin:0;font-size:14px;white-space:pre-line">${escapeHtml(order.notes)}</p>` : ""}
+
+  <p style="margin:16px 0 0"><a href="${adminUrl}" style="display:inline-block;background:#92381A;color:#FBF7EB;padding:8px 16px;text-decoration:none">Open in admin</a></p>
+</div>`;
+
+      await this.mailer.send({
+        to: env.SUPPORT_INBOX,
+        replyTo: order.email,
+        subject: `New order ${order.reference} — ${order.name}`,
+        text,
+        html,
+        tag: "pastry-order-admin-notify",
+      });
+    } catch (err) {
+      this.logger.error(
+        { err, reference: order.reference },
+        "Admin pastry-order notification failed",
+      );
+    }
   }
 
   /**
