@@ -39,7 +39,14 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
   async validate(payload: { sub: string; email: string }): Promise<AuthenticatedUser> {
     const user = await this.db.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, role: true, emailVerifiedAt: true, deletedAt: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        emailVerifiedAt: true,
+        deletedAt: true,
+      },
     });
 
     if (!user || user.deletedAt) {
@@ -49,6 +56,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
     return {
       id: user.id,
       email: user.email,
+      // Fall back to the email-local-part if a legacy row has a null/empty
+      // name. The web app indexes into `name.split(" ")[0]` and would crash
+      // otherwise. Newly-registered users always have a non-empty name.
+      name: user.name?.trim() || user.email.split("@")[0] || "Guest",
       role: user.role,
       emailVerifiedAt: user.emailVerifiedAt,
     };

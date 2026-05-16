@@ -3,10 +3,16 @@ import { type Role } from "@prisma/client";
 /**
  * Shape of the user object hung off the request after JWT validation.
  * Kept narrow on purpose: never expose passwordHash, token state, etc.
+ *
+ * `name` is included because the web app's session-aware UI renders the
+ * user's first name on /account and the full name on admin panels. We
+ * fetch it on every validate() rather than baking it into the JWT so a
+ * profile-name change shows up immediately without re-issuing tokens.
  */
 export interface AuthenticatedUser {
   id: string;
   email: string;
+  name: string;
   role: Role;
   emailVerifiedAt: Date | null;
 }
