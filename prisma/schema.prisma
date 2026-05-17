@@ -56,6 +56,7 @@ model User {
   subscription           Subscription?
   pastryCart             PastryCart?
   pastryOrders           PastryOrder[]
+  notifications          Notification[]
 
   @@index([role])
   @@index([deletedAt])
@@ -831,4 +832,56 @@ model PastryOrderSequenceMarker {
   /// Year, e.g. 2026. Each year resets the counter.
   year       Int @id
   nextNumber Int @default(1)
+}
+
+// =============================================================
+// In-app notifications
+// =============================================================
+//
+// One row per recipient. Staff-audience events (a new paid order, a new
+// contact enquiry) fan out at creation time — we insert one notification
+// row per OWNER/EDITOR/SUPPORT user. This keeps the read-state model
+// trivial (per-row `readAt`) and the query for unread counts cheap
+// (`WHERE userId = $1 AND readAt IS NULL`). The trade-off is some write
+// amplification when a paid order lands — n inserts for n staff members.
+// For Nimi's team size that's negligible, and the simplicity is worth it.
+//
+// `href` is the in-app deep-link to follow when the user clicks the
+// notification (e.g. `/admin/pastry-orders/NIMI-P-2026-0010`). It's
+// always relative to the web origin; the bell UI uses it verbatim.
+//
+// `kind` is a stable identifier — frontend may use it to choose an
+// icon or grouping, and analytics may bucket by it.
+//
+// We deliberately don't store an email-sent flag here — email and in-app
+// are independent channels owned by separate code paths.
+model Notification {
+  id     String @id @default(uuid())
+  userId String
+
+  /// Stable identifier for grouping/analytics — e.g.
+  ///   pastry.order.paid       — fired on payment success
+  ///   pastry.order.preparing  — admin moved order to PREPARING
+  ///   pastry.order.ready      — admin moved order to READY
+  ///   pastry.order.shipped    — admin moved order to SHIPPED
+  ///   pastry.order.delivered  — admin moved order to DELIVERED
+  ///   pastry.order.cancelled  — admin cancelled
+  ///   contact.enquiry.new     — new enquiry submitted (admin-only)
+  kind String
+
+  title String
+  body  String?
+  /// In-app deep-link to follow when the user clicks the row.
+  href String?
+
+  /// Null while unread; stamped when the user clicks or marks-all-read.
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Hot read paths: list newest-first, unread count.
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
 }

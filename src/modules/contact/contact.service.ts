@@ -12,6 +12,7 @@ import {
   contactAckTemplate,
   contactNotifyTemplate,
 } from "../mailer/templates";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 
 import { type CreateContactEnquiryDto } from "./dto/contact.dto";
@@ -30,6 +31,7 @@ export class ContactService {
     private readonly db: PrismaService,
     private readonly mailer: MailerService,
     private readonly turnstile: TurnstileService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(dto: CreateContactEnquiryDto, meta: RequestMeta) {
@@ -96,6 +98,17 @@ export class ContactService {
       } catch (err) {
         this.logger.error({ err, enquiryId: enquiry.id }, "Failed to send admin notification");
       }
+
+      // In-app notification for every staff member. Sits in the bell
+      // dropdown so the team sees the enquiry next time they open the
+      // admin shell even if the email is missed. Fire-and-forget — a
+      // notification write failure cannot reverse the enquiry creation.
+      void this.notifications.notifyStaff({
+        kind: "contact.enquiry.new",
+        title: `New ${enquiry.kind.toLowerCase()} enquiry from ${enquiry.name}`,
+        body: enquiry.notes.length > 140 ? enquiry.notes.slice(0, 140) + "…" : enquiry.notes,
+        href: `/admin/enquiries/${enquiry.id}`,
+      });
     }
 
     if (isHoneypotted) {

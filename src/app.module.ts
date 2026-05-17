@@ -18,6 +18,7 @@ import { GiftingModule } from "./modules/gifting/gifting.module";
 import { HealthModule } from "./modules/health/health.module";
 import { MailerModule } from "./modules/mailer/mailer.module";
 import { NewsletterModule } from "./modules/newsletter/newsletter.module";
+import { NotificationsModule } from "./modules/notifications/notifications.module";
 import { PastriesModule } from "./modules/pastries/pastries.module";
 import { PastryCartModule } from "./modules/pastry-cart/pastry-cart.module";
 import { PastryOrdersModule } from "./modules/pastry-orders/pastry-orders.module";
@@ -102,6 +103,7 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
     CravingsModule,
     BlogModule,
     TestimonialsModule,
+    NotificationsModule,
     PastriesModule,
     PastryCartModule,
     PastryOrdersModule,

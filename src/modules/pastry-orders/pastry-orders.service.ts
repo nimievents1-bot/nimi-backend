@@ -15,6 +15,7 @@ import type Stripe from "stripe";
 
 import { getEnv, publicWebUrl } from "../../config/env";
 import { MailerService } from "../mailer/mailer.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import {
   PastryCartService,
   PASTRY_CART_MIN_MINOR,
@@ -71,6 +72,7 @@ export class PastryOrdersService {
     private readonly stripe: StripeService,
     private readonly cart: PastryCartService,
     private readonly mailer: MailerService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // ---------- checkout ----------
@@ -766,6 +768,41 @@ export class PastryOrdersService {
       this.logger.warn({ err, reference }, "Pastry order status email failed (non-fatal)");
     }
 
+    // In-app notification for the customer mirroring the status email.
+    // We only notify on the customer-visible transitions; PENDING_PAYMENT
+    // and PAID are handled elsewhere (PAID has its own paid-flow
+    // notification with both customer + admin recipients).
+    const customerTitle = (() => {
+      switch (updated.status) {
+        case "PREPARING":
+          return `Order ${updated.reference} — we're preparing it now`;
+        case "READY":
+          return `Order ${updated.reference} is ready`;
+        case "SHIPPED":
+          return `Order ${updated.reference} is on its way`;
+        case "DELIVERED":
+          return `Order ${updated.reference} delivered — enjoy!`;
+        case "CANCELLED":
+          return `Order ${updated.reference} has been cancelled`;
+        default:
+          return null;
+      }
+    })();
+    if (customerTitle) {
+      const kindMap = {
+        PREPARING: "pastry.order.preparing",
+        READY: "pastry.order.ready",
+        SHIPPED: "pastry.order.shipped",
+        DELIVERED: "pastry.order.delivered",
+        CANCELLED: "pastry.order.cancelled",
+      } as const;
+      void this.notifications.notifyUser(updated.userId, {
+        kind: kindMap[updated.status as keyof typeof kindMap] ?? "pastry.order.preparing",
+        title: customerTitle,
+        href: `/account/orders/${updated.reference}`,
+      });
+    }
+
     return updated;
   }
 
@@ -868,6 +905,26 @@ export class PastryOrdersService {
 
     void this.sendPaidEmail(order.email, order.name, order.reference, order.totalMinor);
     void this.sendAdminPaidEmail(order);
+
+    // In-app notifications. Customer sees their own confirmation in the
+    // bell dropdown; every staff member (OWNER/EDITOR/SUPPORT) gets a
+    // row in their own inbox so the team knows an order has landed
+    // without needing to refresh the admin tab. Both calls are
+    // fire-and-forget — a notification write failure must not undo
+    // a successful payment.
+    const formattedTotal = `${order.currency.toUpperCase()} ${(order.totalMinor / 100).toFixed(2)}`;
+    void this.notifications.notifyUser(order.userId, {
+      kind: "pastry.order.paid",
+      title: `Order ${order.reference} confirmed`,
+      body: `Total ${formattedTotal}. We'll let you know the moment it leaves the kitchen.`,
+      href: `/account/orders/${order.reference}`,
+    });
+    void this.notifications.notifyStaff({
+      kind: "pastry.order.paid",
+      title: `New paid order ${order.reference}`,
+      body: `${order.name} · ${formattedTotal}`,
+      href: `/admin/pastry-orders/${order.reference}`,
+    });
   }
 
   /**
