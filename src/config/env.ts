@@ -22,8 +22,33 @@ const EnvSchema = z.object({
 
   JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 chars"),
   JWT_REFRESH_SECRET: z.string().min(32, "JWT_REFRESH_SECRET must be at least 32 chars"),
-  JWT_ACCESS_TTL: z.coerce.number().int().positive().default(900),
-  JWT_REFRESH_TTL: z.coerce.number().int().positive().default(2_592_000),
+
+  /**
+   * Access token TTL in seconds. Default 24 hours.
+   * The proxy in the web app silently refreshes the access token using
+   * the refresh cookie when it expires, so this value mostly governs
+   * how often that refresh dance happens during continuous use — not
+   * how long a user can stay signed in.
+   */
+  JWT_ACCESS_TTL: z.coerce.number().int().positive().default(86_400),
+
+  /**
+   * Refresh token TTL in seconds. Default 10 years.
+   * The operator explicitly wants sessions that never time out: a
+   * customer who doesn't sign out should not be logged out. Every
+   * refresh rotates the token forward, so as long as the user comes
+   * back inside this window (10 years is effectively forever for a
+   * small business app), they stay signed in indefinitely. Sign-out
+   * is the only path that ends a session.
+   *
+   * Trade-off: a stolen refresh cookie remains valid until the user
+   * signs out or you rotate JWT_REFRESH_SECRET. Refresh-token-reuse
+   * detection (in refresh.service.ts) still bumps the entire family
+   * if the same token is presented twice, which is the actual
+   * defence against theft.
+   */
+  JWT_REFRESH_TTL: z.coerce.number().int().positive().default(315_360_000),
+
   COOKIE_DOMAIN: z.string().min(1).default("localhost"),
 
   /**
