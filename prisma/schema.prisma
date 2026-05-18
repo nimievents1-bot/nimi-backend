@@ -878,13 +878,14 @@ model Notification {
   userId String
 
   /// Stable identifier for grouping/analytics — e.g.
-  ///   pastry.order.paid       — fired on payment success
-  ///   pastry.order.preparing  — admin moved order to PREPARING
-  ///   pastry.order.ready      — admin moved order to READY
-  ///   pastry.order.shipped    — admin moved order to SHIPPED
-  ///   pastry.order.delivered  — admin moved order to DELIVERED
-  ///   pastry.order.cancelled  — admin cancelled
-  ///   contact.enquiry.new     — new enquiry submitted (admin-only)
+  ///   pastry.order.paid           — fired on payment success
+  ///   pastry.order.preparing      — admin moved order to PREPARING
+  ///   pastry.order.ready          — admin moved order to READY
+  ///   pastry.order.shipped        — admin moved order to SHIPPED
+  ///   pastry.order.delivered      — admin moved order to DELIVERED
+  ///   pastry.order.cancelled      — admin cancelled
+  ///   contact.enquiry.new         — new enquiry submitted (admin-only)
+  ///   cravings.subscription.new   — new Indulgence Club subscriber (admin-only)
   kind String
 
   title String

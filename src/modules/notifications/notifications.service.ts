@@ -31,7 +31,8 @@ export type NotificationKind =
   | "pastry.order.shipped"
   | "pastry.order.delivered"
   | "pastry.order.cancelled"
-  | "contact.enquiry.new";
+  | "contact.enquiry.new"
+  | "cravings.subscription.new";
 
 export interface NotificationPayload {
   kind: NotificationKind;

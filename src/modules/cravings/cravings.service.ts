@@ -15,12 +15,14 @@ import {
 } from "@prisma/client";
 import type Stripe from "stripe";
 
-import { publicWebUrl } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
+import { adminSubscriptionStartedTemplate } from "../mailer/cravings-admin-templates";
 import {
   indulgenceCreditsIssuedTemplate,
   indulgenceWelcomeTemplate,
 } from "../mailer/indulgence-templates";
 import { MailerService } from "../mailer/mailer.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
 
@@ -115,6 +117,7 @@ export class CravingsService implements OnModuleInit {
     private readonly db: PrismaService,
     private readonly stripe: StripeService,
     private readonly mailer: MailerService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -535,6 +538,12 @@ export class CravingsService implements OnModuleInit {
     // detect "first transition" by checking that we don't already have a
     // CONFIRMATION row for this subscription id — idempotent against
     // Stripe webhook retries and the rare ACTIVE → PAUSED → ACTIVE flow.
+    //
+    // The admin notification fires alongside the customer welcome, with
+    // its own audit marker so Stripe webhook retries can't double-send
+    // either email. Both are wrapped in try/catch — a mail-provider
+    // wobble must not cause the webhook to fail (which would make
+    // Stripe retry the whole event indefinitely).
     if (status === SubscriptionStatus.ACTIVE) {
       try {
         await this.sendWelcomeIfFirstTime({
@@ -546,6 +555,22 @@ export class CravingsService implements OnModuleInit {
         this.logger.warn(
           { err, userId, subscriptionId: sub.id },
           "Indulgence welcome email failed (non-fatal)",
+        );
+      }
+      try {
+        await this.sendAdminSubscriptionIfFirstTime({
+          userId,
+          stripeSubscriptionId: sub.id,
+          monthlyAmountMinor,
+          currency,
+          currentPeriodEnd: sub.current_period_end
+            ? new Date(sub.current_period_end * 1000).toISOString()
+            : null,
+        });
+      } catch (err) {
+        this.logger.warn(
+          { err, userId, subscriptionId: sub.id },
+          "Admin subscription notification failed (non-fatal)",
         );
       }
     }
@@ -812,6 +837,110 @@ export class CravingsService implements OnModuleInit {
     await this.db.auditLog.create({
       data: {
         action: "subscription.welcome_sent",
+        entity: "Subscription",
+        entityId: opts.stripeSubscriptionId,
+        actorId: "system",
+      },
+    });
+  }
+
+  /**
+   * Admin notification for a new subscriber. Audit-marker pattern is
+   * identical to `sendWelcomeIfFirstTime` so Stripe webhook retries
+   * (or the ACTIVE → PAUSED → ACTIVE pattern) can't fire the email
+   * twice. Sent to `SUPPORT_INBOX`, with reply-to set to the
+   * subscriber so the kitchen team can answer them directly.
+   *
+   * Loads the customer's saved profile address so the admin email
+   * shows where to ship monthly deliveries to without needing to dig
+   * through Stripe Dashboard or chase the customer.
+   */
+  private async sendAdminSubscriptionIfFirstTime(opts: {
+    userId: string;
+    stripeSubscriptionId: string;
+    monthlyAmountMinor: number;
+    currency: string;
+    currentPeriodEnd: string | null;
+  }): Promise<void> {
+    const marker = await this.db.auditLog.findFirst({
+      where: {
+        entity: "Subscription",
+        entityId: opts.stripeSubscriptionId,
+        action: "subscription.admin_notified",
+      },
+      select: { id: true },
+    });
+    if (marker) return;
+
+    const user = await this.db.user.findUnique({
+      where: { id: opts.userId },
+      select: {
+        email: true,
+        name: true,
+        phone: true,
+        addressLine1: true,
+        addressLine2: true,
+        addressCity: true,
+        addressPostcode: true,
+        addressCountry: true,
+        subscription: {
+          select: { plan: { select: { name: true } } },
+        },
+      },
+    });
+    if (!user) {
+      this.logger.warn(
+        { userId: opts.userId, subscriptionId: opts.stripeSubscriptionId },
+        "Admin subscription notify: user vanished",
+      );
+      return;
+    }
+
+    const env = getEnv();
+    const tpl = adminSubscriptionStartedTemplate({
+      customerName: user.name,
+      customerEmail: user.email,
+      customerPhone: user.phone,
+      planName: user.subscription?.plan?.name ?? "Indulgence Club",
+      monthlyAmountMinor: opts.monthlyAmountMinor,
+      currency: opts.currency,
+      currentPeriodEnd: opts.currentPeriodEnd,
+      address: {
+        line1: user.addressLine1,
+        line2: user.addressLine2,
+        city: user.addressCity,
+        postcode: user.addressPostcode,
+        country: user.addressCountry,
+      },
+      adminUrl: `${publicWebUrl()}/admin/cravings`,
+    });
+
+    await this.mailer.send({
+      to: env.SUPPORT_INBOX,
+      replyTo: user.email,
+      ...tpl,
+      tag: "indulgence-admin-subscription-started",
+    });
+
+    // In-app notification for every staff member so the team sees the
+    // new subscriber in the bell dropdown even if the email lands in
+    // a spam folder. Fire-and-forget — a notification write failure
+    // must not cause the webhook handler to fail (Stripe would retry
+    // the whole event indefinitely otherwise).
+    const planName = user.subscription?.plan?.name ?? "Indulgence Club";
+    const monthlyDisplay = `${opts.currency.toUpperCase()} ${(opts.monthlyAmountMinor / 100).toFixed(2)}`;
+    void this.notifications.notifyStaff({
+      kind: "cravings.subscription.new",
+      title: `New Indulgence Club subscriber: ${user.name}`,
+      body: `${planName} · ${monthlyDisplay}/month`,
+      href: "/admin/cravings",
+    });
+
+    // Marker prevents a Stripe retry (or a PAUSED↔ACTIVE flap) from
+    // sending a second admin email.
+    await this.db.auditLog.create({
+      data: {
+        action: "subscription.admin_notified",
         entity: "Subscription",
         entityId: opts.stripeSubscriptionId,
         actorId: "system",
