@@ -563,8 +563,33 @@ export class PastryOrdersService {
       itemCount: number;
     }>
   > {
+    // Customer-facing list — deliberately filtered so abandoned and
+    // auto-cancelled attempts don't clutter the inbox. Specifically:
+    //   - CANCELLED: hidden entirely. Two ways an order ends up here:
+    //     (a) the operator cancelled it (rare on the customer side),
+    //     (b) our auto-cancel kicked in when Stripe rejected the
+    //         Checkout session because of a transient config error.
+    //     Either way, the customer never saw money move; there's no
+    //     reason to show them a list of false starts.
+    //   - PENDING_PAYMENT: only shown if it's recent (<= 30 min old)
+    //     because that's a legitimate "I started checkout, came back
+    //     to my account before paying" case. Older pending rows are
+    //     stale abandons and the webhook would never reconcile them.
+    //
+    // The admin list (`listAdminOrders`) shows everything regardless;
+    // operators need the full picture for cleanup and audit.
+    const cutoffForPending = new Date(Date.now() - 30 * 60 * 1000);
     const rows = await this.db.pastryOrder.findMany({
-      where: { userId },
+      where: {
+        userId,
+        OR: [
+          { status: { notIn: [PastryOrderStatus.CANCELLED, PastryOrderStatus.PENDING_PAYMENT] } },
+          {
+            status: PastryOrderStatus.PENDING_PAYMENT,
+            createdAt: { gte: cutoffForPending },
+          },
+        ],
+      },
       orderBy: { createdAt: "desc" },
       take: 50,
       include: { _count: { select: { items: true } } },
@@ -578,6 +603,80 @@ export class PastryOrdersService {
       createdAt: r.createdAt.toISOString(),
       itemCount: r._count.items,
     }));
+  }
+
+  /**
+   * Re-verify a `PENDING_PAYMENT` order against Stripe and force-
+   * complete it if Stripe confirms the session is paid. Used by the
+   * `/cart/success` page as a webhook safety net — if the customer
+   * paid but our DB still shows PENDING_PAYMENT (because the webhook
+   * is slow, misconfigured, or in flight), this endpoint asks Stripe
+   * directly and calls the existing idempotent webhook handler.
+   *
+   * Ownership-checked: customer can only reconcile their own orders.
+   * No-op when the order is already past PENDING_PAYMENT.
+   */
+  async reconcileFromSession(
+    userId: string,
+    reference: string,
+    sessionId: string | undefined,
+  ): Promise<{ status: PastryOrderStatus; reconciled: boolean }> {
+    if (!sessionId || !sessionId.startsWith("cs_")) {
+      throw new BadRequestException("Missing Stripe session id.");
+    }
+    const order = await this.db.pastryOrder.findUnique({
+      where: { reference },
+      select: { id: true, userId: true, status: true, stripeSessionId: true },
+    });
+    if (!order || order.userId !== userId) throw new NotFoundException();
+
+    // Already moved past PENDING_PAYMENT — nothing to do. Return the
+    // current status so the client can stop polling.
+    if (order.status !== PastryOrderStatus.PENDING_PAYMENT) {
+      return { status: order.status, reconciled: false };
+    }
+
+    // Safety: only trust a session id that matches the one we stamped
+    // onto the order at checkout creation. Prevents a customer from
+    // passing any random session id to force-complete another order.
+    if (order.stripeSessionId && order.stripeSessionId !== sessionId) {
+      this.logger.warn(
+        { reference, expected: order.stripeSessionId, presented: sessionId },
+        "Reconcile attempt with mismatched session id",
+      );
+      throw new BadRequestException("Session id does not match this order.");
+    }
+
+    if (!this.stripe.isAvailable()) {
+      throw new ServiceUnavailableException("Payments are not available right now.");
+    }
+
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await this.stripe.sdk.checkout.sessions.retrieve(sessionId);
+    } catch (err) {
+      this.logger.error({ err, sessionId, reference }, "Stripe session.retrieve failed");
+      throw new ServiceUnavailableException(
+        "We couldn't verify your payment with our provider. Please try again in a moment.",
+      );
+    }
+
+    // Stripe authoritative state. We require `payment_status === "paid"`
+    // — `complete` alone isn't enough since complete + unpaid means the
+    // session expired before the customer finished checkout.
+    if (session.payment_status !== "paid") {
+      return { status: order.status, reconciled: false };
+    }
+
+    // Reuse the webhook handler. It's idempotent — if the webhook
+    // lands in parallel it'll early-return on the PAID check.
+    await this.onCheckoutCompleted({
+      id: `recon_${sessionId}`,
+      type: "checkout.session.completed",
+      data: { object: session },
+    } as unknown as Stripe.Event);
+
+    return { status: PastryOrderStatus.PAID, reconciled: true };
   }
 
   async getMyOrderByReference(
