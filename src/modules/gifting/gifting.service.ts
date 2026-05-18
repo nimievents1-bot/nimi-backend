@@ -3,10 +3,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  type OnModuleInit,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import {
   type GiftCollection,
+  GiftCategory,
   type GiftOrder,
   GiftOrderStatus,
   Prisma,
@@ -45,8 +47,95 @@ interface CheckoutResult {
  *   - All status transitions go through `transition()` which validates the
  *     transition is legal and writes audit data.
  */
+/**
+ * Default gift collections seeded on first boot.
+ *
+ * Mirrors the placeholder set the marketing `/gifting` page falls back
+ * to when the API returns zero published rows. Seeding the same shape
+ * server-side means a fresh deploy can immediately accept enquiries
+ * (the marketing page links to `/gifting/<slug>` which fetches by slug
+ * — and would 404 if the row didn't exist).
+ *
+ * Slugs are stable and used in URLs + Stripe metadata; don't rename
+ * them after orders exist.
+ */
+const DEFAULT_GIFT_COLLECTIONS: ReadonlyArray<{
+  slug: string;
+  category: GiftCategory;
+  name: string;
+  description: string;
+  items: string[];
+  unitPriceMinor: number;
+  priceMaxMinor: number | null;
+  moq: number;
+  leadTimeDays: number;
+  position: number;
+}> = [
+  {
+    slug: "essential-collection",
+    category: GiftCategory.CORPORATE,
+    name: "The Essential Collection",
+    description: "Clean, professional and practical everyday gifting.",
+    items: ["Branded notebook", "Pen", "Reusable bottle", "Custom card"],
+    unitPriceMinor: 1000,
+    priceMaxMinor: 1500,
+    moq: 25,
+    leadTimeDays: 42,
+    position: 1,
+  },
+  {
+    slug: "signature-collection",
+    category: GiftCategory.CORPORATE,
+    name: "The Signature Collection",
+    description: "Elevated branded gifting designed to impress clients and teams.",
+    items: ["Premium notebook", "Engraved pen", "Tote bag", "Bespoke card"],
+    unitPriceMinor: 1300,
+    priceMaxMinor: 2000,
+    moq: 25,
+    leadTimeDays: 42,
+    position: 2,
+  },
+  {
+    slug: "executive-series",
+    category: GiftCategory.CORPORATE,
+    name: "The Executive Series",
+    description: "Premium gifting for senior clients and high-value relationships.",
+    items: ["Leather notebook", "Executive pen set", "Embossed gift box"],
+    unitPriceMinor: 1800,
+    priceMaxMinor: 2500,
+    moq: 10,
+    leadTimeDays: 56,
+    position: 3,
+  },
+  {
+    slug: "heritage-collection",
+    category: GiftCategory.WEDDINGS,
+    name: "The Heritage Collection",
+    description:
+      "Modern design with subtle cultural elements — Ankara pouch, custom tumbler, hand fan.",
+    items: ["Ankara-print pouch", "Custom tumbler", "Hand fan", "Thank-you card"],
+    unitPriceMinor: 2400,
+    priceMaxMinor: 3600,
+    moq: 25,
+    leadTimeDays: 56,
+    position: 4,
+  },
+  {
+    slug: "soft-luxe-box",
+    category: GiftCategory.PRIVATE,
+    name: "The Soft Luxe Box",
+    description: "Lifestyle and self-care gifting — satin eye mask, candle, towel, mini pouch.",
+    items: ["Satin eye mask", "Soy candle", "Hand towel", "Mini pouch"],
+    unitPriceMinor: 2800,
+    priceMaxMinor: 4200,
+    moq: 10,
+    leadTimeDays: 56,
+    position: 5,
+  },
+];
+
 @Injectable()
-export class GiftingService {
+export class GiftingService implements OnModuleInit {
   private readonly logger = new Logger(GiftingService.name);
 
   constructor(
@@ -54,6 +143,59 @@ export class GiftingService {
     private readonly stripe: StripeService,
     private readonly turnstile: TurnstileService,
   ) {}
+
+  /**
+   * Seed the default gift collections on first boot. Same pattern as
+   * `CravingsService.onModuleInit`: idempotent (no-op when any row
+   * exists) so the operator can hide/rename collections without them
+   * coming back on the next deploy.
+   *
+   * Collections are seeded **unpublished** (`published: false`) — the
+   * operator publishes via the admin endpoint once photography and
+   * pricing are finalised. Until then, `/gifting` falls back to its
+   * marketing placeholders rather than showing half-finished rows.
+   * The individual `/gifting/<slug>` pages still resolve because the
+   * row exists; we deliberately surface them as "draft" via the
+   * normal `getPublishedCollection` 404 only when published is false.
+   *
+   * UPDATE: seeding as `published: true` because the operator
+   * expectation here is "the cards on /gifting should be clickable".
+   * Hiding is achievable per-row from the admin (later) — for now
+   * the default-on posture matches the rest of the seeded catalog
+   * (Cravings tiers seed active=true, pastries seed available=true).
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const existing = await this.db.giftCollection.count();
+      if (existing > 0) return;
+
+      await this.db.giftCollection.createMany({
+        data: DEFAULT_GIFT_COLLECTIONS.map((c) => ({
+          slug: c.slug,
+          category: c.category,
+          name: c.name,
+          description: c.description,
+          items: c.items as Prisma.InputJsonValue,
+          unitPriceMinor: c.unitPriceMinor,
+          priceMaxMinor: c.priceMaxMinor,
+          currency: "gbp",
+          moq: c.moq,
+          leadTimeDays: c.leadTimeDays,
+          position: c.position,
+          published: true,
+        })),
+        skipDuplicates: true,
+      });
+
+      this.logger.log(
+        `Seeded ${DEFAULT_GIFT_COLLECTIONS.length} default gift collections.`,
+      );
+    } catch (err) {
+      // Don't crash the boot — the marketing page has its own fallback
+      // and the operator can seed manually via Prisma Studio.
+      this.logger.error({ err }, "Failed to seed default gift collections");
+    }
+  }
 
   // ---------- public catalog ----------
 

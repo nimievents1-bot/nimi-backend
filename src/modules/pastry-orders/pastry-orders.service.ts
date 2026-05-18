@@ -15,6 +15,12 @@ import type Stripe from "stripe";
 
 import { getEnv, publicWebUrl } from "../../config/env";
 import { MailerService } from "../mailer/mailer.service";
+import {
+  pastryOrderAdminNotifyTemplate,
+  pastryOrderConfirmedTemplate,
+  pastryOrderStatusTemplate,
+  type PastryOrderStatusForEmail,
+} from "../mailer/pastry-templates";
 import { NotificationsService } from "../notifications/notifications.service";
 import {
   PastryCartService,
@@ -24,24 +30,6 @@ import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
 
 import { type StartPastryCheckoutDto } from "./dto/checkout.dto";
-
-/**
- * Minimal HTML escaper for values we splice into the admin-notification
- * email body. The mailer doesn't interpolate templates for this module
- * (no templating engine on the API side for pastry-order emails — see
- * `sendPaidEmail` for the inline pattern), so we sanitise customer-
- * supplied strings ourselves to defeat anything like `<script>` in a
- * name or address field. Newlines are preserved by the surrounding
- * `white-space: pre-line` styling, not by this helper.
- */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 interface SessionUser {
   id: string;
@@ -1057,93 +1045,42 @@ export class PastryOrdersService {
   }): Promise<void> {
     try {
       const env = getEnv();
-      const adminUrl = `${publicWebUrl()}/admin/pastry-orders/${order.reference}`;
-      const fmt = (minor: number) =>
-        `${order.currency.toUpperCase()} ${(minor / 100).toFixed(2)}`;
 
-      // Item lines for both the plain-text body and the HTML body.
-      // We deliberately read `itemSnapshot.name` (the name as it was at
-      // order time) rather than joining against PastryItem — so an
-      // admin who later renamed an item still sees what was ordered.
-      const itemRows = order.items.map((line) => {
+      // Resolve display names off the snapshot (so renamed items still
+      // show what was actually ordered).
+      const items = order.items.map((line) => {
         const snap = (line.itemSnapshot ?? {}) as { name?: string; slug?: string };
-        const name = snap.name ?? snap.slug ?? "(unknown item)";
         return {
-          name,
+          name: snap.name ?? snap.slug ?? "(unknown item)",
           quantity: line.quantity,
-          unitPrice: fmt(line.unitPriceMinor),
-          lineTotal: fmt(line.totalMinor),
+          unitPriceMinor: line.unitPriceMinor,
+          totalMinor: line.totalMinor,
         };
       });
 
-      const itemsText = itemRows
-        .map((r) => `  - ${r.quantity} × ${r.name} @ ${r.unitPrice} = ${r.lineTotal}`)
-        .join("\n");
-
-      const itemsHtml = itemRows
-        .map(
-          (r) =>
-            `<tr><td style="padding:4px 8px">${r.quantity} × ${escapeHtml(r.name)}</td><td style="padding:4px 8px;text-align:right">${r.unitPrice}</td><td style="padding:4px 8px;text-align:right">${r.lineTotal}</td></tr>`,
-        )
-        .join("");
-
-      const totalsBlock = `Subtotal: ${fmt(order.subtotalMinor)}
-${order.creditAppliedMinor > 0 ? `Indulgence Credit: −${fmt(order.creditAppliedMinor)}\n` : ""}Total paid: ${fmt(order.totalMinor)}`;
-
-      const text = `New pastry order — ${order.reference}
-
-Customer: ${order.name} <${order.email}>${order.phone ? ` · ${order.phone}` : ""}
-
-Items:
-${itemsText}
-
-${totalsBlock}
-
-Deliver to:
-${order.shippingLine1}
-${order.shippingLine2 ? `${order.shippingLine2}\n` : ""}${order.shippingCity} ${order.shippingPostcode}
-${order.shippingCountry}
-
-${order.notes ? `Notes for the kitchen:\n${order.notes}\n\n` : ""}Open in admin: ${adminUrl}
-
-— Nimi Events`;
-
-      const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#1c1917;max-width:560px">
-  <h2 style="margin:0 0 12px;color:#5C1F18">New pastry order — ${order.reference}</h2>
-  <p style="margin:0 0 8px"><strong>${escapeHtml(order.name)}</strong> &lt;${escapeHtml(order.email)}&gt;${order.phone ? ` · ${escapeHtml(order.phone)}` : ""}</p>
-
-  <h3 style="margin:16px 0 4px">Items</h3>
-  <table style="border-collapse:collapse;width:100%;font-size:14px;border:1px solid #e7e5e4">
-    <thead><tr style="background:#FBF7EB"><th style="text-align:left;padding:4px 8px">Item</th><th style="text-align:right;padding:4px 8px">Unit</th><th style="text-align:right;padding:4px 8px">Line</th></tr></thead>
-    <tbody>${itemsHtml}</tbody>
-  </table>
-
-  <h3 style="margin:16px 0 4px">Totals</h3>
-  <p style="margin:0;font-size:14px">
-    Subtotal: ${fmt(order.subtotalMinor)}<br>
-    ${order.creditAppliedMinor > 0 ? `Indulgence Credit: −${fmt(order.creditAppliedMinor)}<br>` : ""}
-    <strong>Total paid: ${fmt(order.totalMinor)}</strong>
-  </p>
-
-  <h3 style="margin:16px 0 4px">Deliver to</h3>
-  <p style="margin:0;font-size:14px">
-    ${escapeHtml(order.shippingLine1)}<br>
-    ${order.shippingLine2 ? `${escapeHtml(order.shippingLine2)}<br>` : ""}
-    ${escapeHtml(order.shippingCity)} ${escapeHtml(order.shippingPostcode)}<br>
-    ${escapeHtml(order.shippingCountry)}
-  </p>
-
-  ${order.notes ? `<h3 style="margin:16px 0 4px">Notes for the kitchen</h3><p style="margin:0;font-size:14px;white-space:pre-line">${escapeHtml(order.notes)}</p>` : ""}
-
-  <p style="margin:16px 0 0"><a href="${adminUrl}" style="display:inline-block;background:#92381A;color:#FBF7EB;padding:8px 16px;text-decoration:none">Open in admin</a></p>
-</div>`;
+      const tpl = pastryOrderAdminNotifyTemplate({
+        reference: order.reference,
+        customerName: order.name,
+        customerEmail: order.email,
+        customerPhone: order.phone,
+        totalMinor: order.totalMinor,
+        subtotalMinor: order.subtotalMinor,
+        creditAppliedMinor: order.creditAppliedMinor,
+        currency: order.currency,
+        shippingLine1: order.shippingLine1,
+        shippingLine2: order.shippingLine2,
+        shippingCity: order.shippingCity,
+        shippingPostcode: order.shippingPostcode,
+        shippingCountry: order.shippingCountry,
+        notes: order.notes,
+        items,
+        adminUrl: `${publicWebUrl()}/admin/pastry-orders/${encodeURIComponent(order.reference)}`,
+      });
 
       await this.mailer.send({
         to: env.SUPPORT_INBOX,
         replyTo: order.email,
-        subject: `New order ${order.reference} — ${order.name}`,
-        text,
-        html,
+        ...tpl,
         tag: "pastry-order-admin-notify",
       });
     } catch (err) {
@@ -1155,10 +1092,11 @@ ${order.notes ? `Notes for the kitchen:\n${order.notes}\n\n` : ""}Open in admin:
   }
 
   /**
-   * Plain-text confirmation. We don't send a templated HTML email here
-   * for v1 — Stripe sends its own receipt for paid orders, and this
-   * lightweight confirmation lets the customer find their reference
-   * even if the Stripe email gets lost in spam.
+   * Branded customer paid-confirmation email. Rendered via the shared
+   * email shell (cream-50 paper, maroon brand band, italic-serif CTA)
+   * so the inbox experience matches the on-site design language.
+   * Stripe sends its own receipt; this complements it with a brand
+   * touchpoint and the reference number front-and-centre.
    */
   private async sendPaidEmail(
     to: string,
@@ -1166,28 +1104,17 @@ ${order.notes ? `Notes for the kitchen:\n${order.notes}\n\n` : ""}Open in admin:
     reference: string,
     totalMinor: number,
   ): Promise<void> {
-    const total =
-      totalMinor === 0 ? "fully covered by credits" : `£${(totalMinor / 100).toFixed(2)}`;
     try {
+      const tpl = pastryOrderConfirmedTemplate({
+        recipientName,
+        reference,
+        totalMinor,
+        currency: "gbp",
+        orderUrl: `${publicWebUrl()}/account/orders/${encodeURIComponent(reference)}`,
+      });
       await this.mailer.send({
         to,
-        subject: `Order ${reference} confirmed`,
-        text: `Hi ${recipientName.split(" ")[0]},
-
-Your pastry order is confirmed.
-
-Reference: ${reference}
-Total: ${total}
-
-We'll be in touch when it's prepared. Thank you for ordering with us.
-
-— Nimi Events`,
-        html: `<p>Hi ${recipientName.split(" ")[0]},</p>
-<p>Your pastry order is confirmed.</p>
-<p><strong>Reference:</strong> ${reference}<br>
-<strong>Total:</strong> ${total}</p>
-<p>We&rsquo;ll be in touch when it&rsquo;s prepared. Thank you for ordering with us.</p>
-<p>— Nimi Events</p>`,
+        ...tpl,
         tag: "pastry-order-confirmed",
       });
     } catch (err) {
@@ -1197,87 +1124,35 @@ We'll be in touch when it's prepared. Thank you for ordering with us.
 
   /**
    * Customer-facing email for status transitions that materially change
-   * what the customer is waiting for. PAID is handled separately via the
-   * payment-confirmed mail; PENDING_PAYMENT is internal-only.
+   * what the customer is waiting for. Branded via the shared email
+   * shell. PAID is handled separately via the payment-confirmed mail;
+   * PENDING_PAYMENT, PAID, and REFUNDED are silent (no transition email
+   * makes sense for these states).
    */
   private async dispatchStatusEmail(order: PastryOrder): Promise<void> {
-    const accountUrl = `${publicWebUrl()}/account/orders`;
-    const firstName = order.name.split(" ")[0] ?? order.name;
+    // Map the Prisma enum value to the template's expected union. The
+    // template enforces the brand voice + design for each status; we
+    // skip any state that doesn't have a customer-facing email.
+    const STATUS_MAP: Partial<Record<PastryOrderStatus, PastryOrderStatusForEmail>> = {
+      [PastryOrderStatus.PREPARING]: "PREPARING",
+      [PastryOrderStatus.READY]: "READY",
+      [PastryOrderStatus.SHIPPED]: "SHIPPED",
+      [PastryOrderStatus.DELIVERED]: "DELIVERED",
+      [PastryOrderStatus.CANCELLED]: "CANCELLED",
+    };
+    const mappedStatus = STATUS_MAP[order.status];
+    if (!mappedStatus) return;
 
-    let subject: string | undefined;
-    let body: string | undefined;
-    switch (order.status) {
-      case PastryOrderStatus.PREPARING:
-        subject = `Order ${order.reference} — we're on it`;
-        body = `Hi ${firstName},
-
-The kitchen has started on your order. We'll be in touch when it's ready.
-
-Reference: ${order.reference}
-View order: ${accountUrl}
-
-— Nimi Events`;
-        break;
-      case PastryOrderStatus.READY:
-        subject = `Order ${order.reference} — ready for dispatch`;
-        body = `Hi ${firstName},
-
-Your order is ready and queued for delivery.
-
-Reference: ${order.reference}
-Delivery to: ${order.shippingLine1}${order.shippingLine2 ? `, ${order.shippingLine2}` : ""}, ${order.shippingCity} ${order.shippingPostcode}
-View order: ${accountUrl}
-
-— Nimi Events`;
-        break;
-      case PastryOrderStatus.SHIPPED:
-        subject = `Order ${order.reference} — on its way`;
-        body = `Hi ${firstName},
-
-Your order is out for delivery and should be with you shortly.
-
-Reference: ${order.reference}
-View order: ${accountUrl}
-
-— Nimi Events`;
-        break;
-      case PastryOrderStatus.DELIVERED:
-        subject = `Order ${order.reference} — delivered`;
-        body = `Hi ${firstName},
-
-Your order has been delivered. We hope every bite was worth the wait.
-
-If anything wasn't right, hit reply and let us know — we read every message.
-
-Reference: ${order.reference}
-
-— Nimi Events`;
-        break;
-      case PastryOrderStatus.CANCELLED:
-        subject = `Order ${order.reference} — cancelled`;
-        body = `Hi ${firstName},
-
-Your order has been cancelled. Any payment will be refunded to your original card within 5–10 business days, and any Indulgence Credits used have been returned to your balance.
-
-Reference: ${order.reference}
-
-— Nimi Events`;
-        break;
-      default:
-        // PAID, PENDING_PAYMENT, REFUNDED — handled elsewhere (or silent).
-        return;
-    }
-
-    if (!subject || !body) return;
+    const tpl = pastryOrderStatusTemplate({
+      recipientName: order.name,
+      reference: order.reference,
+      status: mappedStatus,
+      orderUrl: `${publicWebUrl()}/account/orders/${encodeURIComponent(order.reference)}`,
+    });
 
     await this.mailer.send({
       to: order.email,
-      subject,
-      text: body,
-      html: body
-        .split("\n\n")
-        .map((para) => `<p>${para.replace(/\n/g, "<br>")}</p>`)
-        .join(""),
+      ...tpl,
       tag: `pastry-order-${order.status.toLowerCase()}`,
     });
   }
