@@ -75,6 +75,7 @@ model User {
   pastryCart             PastryCart?
   pastryOrders           PastryOrder[]
   notifications          Notification[]
+  promoCodes             PromoCode[]
 
   @@index([role])
   @@index([deletedAt])
@@ -795,6 +796,17 @@ model PastryOrder {
 
   subtotalMinor      Int
   creditAppliedMinor Int    @default(0)
+  /// Birthday / promo discount applied to this order in minor units.
+  /// Stacks with Indulgence credits at checkout: promo is applied first
+  /// to the subtotal, then credits, then the remainder is what Stripe
+  /// actually charges. We persist the resolved value (not the percent)
+  /// so the receipt can render the exact pounds-off the customer saw.
+  promoDiscountMinor Int    @default(0)
+  /// Soft-link to the PromoCode row that was redeemed for this order.
+  /// No FK relation declared so the PromoCode model stays focused on
+  /// its own lifecycle (issue / validate / mark-redeemed) without a
+  /// reverse relation on PastryOrder cluttering the read query plan.
+  promoCodeId        String?
   totalMinor         Int
   currency           String @default("gbp")
 
@@ -913,4 +925,93 @@ model Notification {
   // Hot read paths: list newest-first, unread count.
   @@index([userId, createdAt])
   @@index([userId, readAt])
+}
+
+// =============================================================
+// Promotional / birthday discount codes
+// =============================================================
+//
+// Per-customer discount codes — distinct from Stripe-managed promotion
+// codes because we need:
+//   1. Per-user binding (a birthday code belongs to one specific user;
+//      sharing it with a friend should be rejected even if the friend
+//      types the right string).
+//   2. Atomic single-use enforcement at our checkout layer, BEFORE we
+//      ever hand off to Stripe — so a customer who half-completes a
+//      Stripe Checkout, refreshes, and tries again won't double-redeem
+//      a one-shot code.
+//   3. A history trail for support questions ("did my birthday treat
+//      land? did I use it?") that Stripe's Dashboard alone can't tell
+//      us in a single query.
+//
+// The birthday flow uses kind=BIRTHDAY with `percentOff`, `userId` set,
+// `maxRedemptions=1`, and `validUntil` = today + 7 days. The cron writes
+// one of these per qualifying user every morning, then emails the code
+// to the customer. The pastry checkout looks up `code` + `userId`,
+// validates the window + min spend + redemption count, and atomically
+// stamps `redeemedAt` + `redeemedOrderRef` while incrementing
+// `redemptionsUsed`. The atomic move is a `updateMany` filter that
+// counts un-redeemed rows — see `PromoCodeService.redeem`.
+enum PromoCodeKind {
+  /// Sent by the daily birthday cron to a user whose DD/MM matches today.
+  /// Single-use, percent-off, 7-day window.
+  BIRTHDAY
+  /// First-order welcome treat (not wired yet — reserved for later).
+  WELCOME
+  /// Hand-issued admin promo, e.g. apology credit or marketing campaign.
+  GENERIC
+}
+
+model PromoCode {
+  id              String        @id @default(uuid())
+  /// Public-facing string the customer types in (e.g. BDAY-JANE-7Q2X).
+  /// Generated to be unguessable so leak-and-share doesn't grant
+  /// free orders to people other than the bound user.
+  code            String        @unique
+  /// Nullable — when set, only this user can redeem the code. Birthday
+  /// and welcome codes are always user-bound. A null `userId` means
+  /// "anyone who knows the code can redeem", reserved for GENERIC.
+  userId          String?
+  user            User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind            PromoCodeKind
+
+  // ----- discount specification (exactly one of percent/amount) -----
+  /// 1–100 percent off the order subtotal.
+  percentOff      Int?
+  /// Fixed-amount discount in minor units of `currency`.
+  amountOffMinor  Int?
+  /// ISO-4217 currency code — required when `amountOffMinor` is set.
+  currency        String?
+
+  // ----- redemption constraints -----
+  /// Optional minimum order subtotal — codes don't apply to tiny orders.
+  /// Useful if the operator wants to ensure margin on a percentage off.
+  minSpendMinor   Int?
+  /// Per-code redemption cap. 1 = single-use (the birthday default).
+  maxRedemptions  Int           @default(1)
+  /// Counter incremented atomically at redemption time.
+  redemptionsUsed Int           @default(0)
+  /// Inclusive — code is valid from this instant.
+  validFrom       DateTime      @default(now())
+  /// Exclusive — code is no longer valid at or after this instant.
+  validUntil      DateTime
+
+  // ----- single-use convenience (denormalised; null until redeemed) -----
+  redeemedAt       DateTime?
+  /// PastryOrder.reference the code was applied to. Denormalised to
+  /// avoid a join when surfacing redemption history in admin / support.
+  redeemedOrderRef String?
+
+  /// Free-form metadata for admin-issued codes (campaign id, reason for
+  /// apology credit, etc.). Indexed on `kind` only, not on this field.
+  notes           String?
+
+  createdAt       DateTime      @default(now())
+
+  // Look-ups we run hot:
+  //   - "does this user have an unredeemed code of kind X today?"
+  //   - "what is the latest birthday code for user U?"
+  //   - validity-window scans for the daily cleanup job.
+  @@index([userId, kind, validUntil])
+  @@index([validUntil])
 }

@@ -39,6 +39,13 @@ interface PastryOrderConfirmedProps {
   reference: string;
   totalMinor: number;
   creditAppliedMinor?: number;
+  /**
+   * Birthday / promo-code discount applied in minor units. Surfaced
+   * as a small "you saved X" line below the total so the customer
+   * gets the satisfaction-of-discount moment in the inbox, mirroring
+   * the breakdown on the order detail page.
+   */
+  promoDiscountMinor?: number;
   currency: string;
   orderUrl: string;
 }
@@ -62,6 +69,11 @@ export function pastryOrderConfirmedTemplate(props: PastryOrderConfirmedProps) {
         ${emailFact("Total", totalDisplay)}
       </div>
       ${
+        (props.promoDiscountMinor ?? 0) > 0
+          ? `<div style="margin-top:6px;color:${BRAND_COLOURS.orange700};font-size:13px;">Promo discount applied: −${fmtMoney(props.promoDiscountMinor ?? 0, props.currency)}</div>`
+          : ""
+      }
+      ${
         (props.creditAppliedMinor ?? 0) > 0
           ? `<div style="margin-top:6px;color:${BRAND_COLOURS.neutral500};font-size:13px;">Indulgence Credit applied: ${fmtMoney(props.creditAppliedMinor ?? 0, props.currency)}</div>`
           : ""
@@ -80,6 +92,11 @@ Your pastry order is in. We'll prepare it freshly and let you know the moment it
 
 Reference: ${props.reference}
 Total:     ${totalDisplay}${
+    (props.promoDiscountMinor ?? 0) > 0
+      ? `
+Promo discount applied: −${fmtMoney(props.promoDiscountMinor ?? 0, props.currency)}`
+      : ""
+  }${
     (props.creditAppliedMinor ?? 0) > 0
       ? `
 Indulgence Credit applied: ${fmtMoney(props.creditAppliedMinor ?? 0, props.currency)}`
@@ -200,6 +217,10 @@ interface PastryOrderAdminNotifyProps {
   totalMinor: number;
   subtotalMinor: number;
   creditAppliedMinor: number;
+  /** Birthday / promo-code discount applied in minor units (0 if none). */
+  promoDiscountMinor?: number;
+  /** Optional promo-code string for the admin to spot-check at a glance. */
+  promoCode?: string | null;
   currency: string;
   shippingLine1: string;
   shippingLine2: string | null;
@@ -260,6 +281,14 @@ export function pastryOrderAdminNotifyTemplate(props: PastryOrderAdminNotifyProp
         <td align="right" style="padding:2px 0;font-family:${SANS_STACK};font-size:14px;color:${BRAND_COLOURS.neutral500};">Subtotal</td>
         <td align="right" width="120" style="padding:2px 0;font-family:${SANS_STACK};font-size:14px;color:${BRAND_COLOURS.neutral800};">${fmt(props.subtotalMinor)}</td>
       </tr>
+      ${
+        (props.promoDiscountMinor ?? 0) > 0
+          ? `<tr>
+        <td align="right" style="padding:2px 0;font-family:${SANS_STACK};font-size:14px;color:${BRAND_COLOURS.neutral500};">Promo code${props.promoCode ? ` (${escapeHtml(props.promoCode)})` : ""}</td>
+        <td align="right" style="padding:2px 0;font-family:${SANS_STACK};font-size:14px;color:${BRAND_COLOURS.orange600};">−${fmt(props.promoDiscountMinor ?? 0)}</td>
+      </tr>`
+          : ""
+      }
       ${
         props.creditAppliedMinor > 0
           ? `<tr>
@@ -326,7 +355,7 @@ ${props.items
   .join("\n")}
 
 Subtotal: ${fmt(props.subtotalMinor)}
-${props.creditAppliedMinor > 0 ? `Indulgence Credit: −${fmt(props.creditAppliedMinor)}\n` : ""}Total paid: ${fmt(props.totalMinor)}
+${(props.promoDiscountMinor ?? 0) > 0 ? `Promo code${props.promoCode ? ` (${props.promoCode})` : ""}: −${fmt(props.promoDiscountMinor ?? 0)}\n` : ""}${props.creditAppliedMinor > 0 ? `Indulgence Credit: −${fmt(props.creditAppliedMinor)}\n` : ""}Total paid: ${fmt(props.totalMinor)}
 
 Deliver to:
 ${props.shippingLine1}

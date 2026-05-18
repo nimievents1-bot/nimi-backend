@@ -49,4 +49,19 @@ export class StartPastryCheckoutDto {
   @IsString({ message: "Please check the kitchen notes field." })
   @MaxLength(800, { message: "Notes for the kitchen are too long (max 800 characters)." })
   notes?: string;
+
+  /**
+   * Optional promo code (birthday treat, welcome code, admin-issued
+   * discount). Validated server-side against `PromoCodesService` —
+   * checks ownership, validity window, redemption count, min spend,
+   * and currency. Atomically marked redeemed in the same DB
+   * transaction that creates the PastryOrder, so a customer can't
+   * spend the same code twice even with rapid double-submits.
+   * Whitespace and case are normalised before lookup, so "  bday-jane-7q2x  "
+   * matches the stored "BDAY-JANE-7Q2X".
+   */
+  @IsOptional()
+  @IsString({ message: "Please check the promo code field." })
+  @MaxLength(64, { message: "Promo code is too long." })
+  promoCode?: string;
 }

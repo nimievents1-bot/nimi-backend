@@ -1,13 +1,14 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { SubscriptionStatus } from "@prisma/client";
 
-import { getEnv, publicWebUrl } from "../../config/env";
+import { publicWebUrl } from "../../config/env";
 import {
   indulgenceBirthdayTemplate,
   indulgenceCreditsReminderTemplate,
 } from "../mailer/indulgence-templates";
 import { MailerService } from "../mailer/mailer.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { PromoCodesService } from "../promo-codes/promo-codes.service";
 
 /**
  * CronService — pull-style scheduled jobs.
@@ -38,9 +39,30 @@ export class CronService {
   /** Skip reminders for any subscription with a balance below this floor. */
   private static readonly REMINDER_BALANCE_FLOOR_MINOR = 25_00; // £25 — matches the pastry minimum
 
+  /**
+   * Birthday treat: percent-off the cart subtotal. Sized to be a
+   * meaningful gesture without breaking margin on a small order — at
+   * 15 % a £25 cart saves £3.75, which is the cost-of-goods envelope
+   * the operator was comfortable with at design time. Adjustable here
+   * in one place rather than spread across email + checkout.
+   */
+  private static readonly BIRTHDAY_PERCENT_OFF = 15;
+
+  /** Days the birthday code stays valid after issue (matches email copy). */
+  private static readonly BIRTHDAY_VALID_DAYS = 7;
+
+  /**
+   * Floor the birthday treat at the same £25 minimum we use for the
+   * pastry checkout. Otherwise a customer could try to redeem the
+   * code on a £1 order and get a free pastry; the floor keeps the
+   * incentive aligned with a real basket.
+   */
+  private static readonly BIRTHDAY_MIN_SPEND_MINOR = 25_00;
+
   constructor(
     private readonly db: PrismaService,
     private readonly mailer: MailerService,
+    private readonly promoCodes: PromoCodesService,
   ) {}
 
   // ---------- birthday flow ----------
@@ -55,10 +77,19 @@ export class CronService {
    * after a successful send, and skip any user with an existing marker for
    * today. Triggering the cron twice in one day is therefore safe.
    *
-   * Promo code: a single static code (`NIMIBDAY`) is sent. The operator
-   * configures this as a Stripe Promotion Code with one-redemption-per-customer
-   * and 7-day validity from issue. (When the per-user generator lands in
-   * Track 8b, this method will switch to per-user codes.)
+   * Promo code: a fresh per-user, unguessable code is issued via
+   * `PromoCodesService.issueBirthdayCode` (one-shot, 7-day window,
+   * `BIRTHDAY_PERCENT_OFF` % off, floor at the £25 pastry minimum).
+   * The code is bound to the recipient's `userId`, so sharing it
+   * with a friend (or having it scraped from an email cache) won't
+   * grant a discount to anyone else.
+   *
+   * On the rare path where code issuance fails (transient DB error,
+   * unique-collision after retries), we DON'T fall back to a static
+   * code — sending a birthday email without a working code is worse
+   * than silently skipping that user for the day and retrying
+   * tomorrow. The error is logged with the userId so an operator
+   * can re-trigger manually if needed.
    */
   async runBirthdayJob(now: Date = new Date()): Promise<{
     candidates: number;
@@ -93,11 +124,32 @@ export class CronService {
         continue;
       }
 
+      // Issue the per-user code FIRST so we never email a recipient
+      // a code we then fail to persist. The PromoCodes service is
+      // idempotent (returns the existing un-redeemed birthday code
+      // if one's still valid for 24h+), so a cron retry after a
+      // partial failure won't double-issue.
+      let promoCodeString: string;
+      try {
+        const promo = await this.promoCodes.issueBirthdayCode({
+          userId: u.id,
+          firstName: firstNameOf(u.name) ?? u.name,
+          percentOff: CronService.BIRTHDAY_PERCENT_OFF,
+          validDays: CronService.BIRTHDAY_VALID_DAYS,
+          minSpendMinor: CronService.BIRTHDAY_MIN_SPEND_MINOR,
+        });
+        promoCodeString = promo.code;
+      } catch (err) {
+        this.logger.error({ err, userId: u.id }, "Birthday code allocation failed; skipping");
+        skipped += 1;
+        continue;
+      }
+
       try {
         const tpl = indulgenceBirthdayTemplate({
           firstName: firstNameOf(u.name) ?? u.name,
-          promoCode: "NIMIBDAY",
-          validDays: 7,
+          promoCode: promoCodeString,
+          validDays: CronService.BIRTHDAY_VALID_DAYS,
           accountUrl: `${publicWebUrl()}/cravings`,
         });
         await this.mailer.send({ to: u.email, ...tpl, tag: "indulgence-birthday" });
@@ -108,6 +160,7 @@ export class CronService {
             entity: "User",
             entityId: u.id,
             actorId: "system",
+            after: { promoCode: promoCodeString } as never,
           },
         });
         sent += 1;

@@ -90,4 +90,23 @@ export class PastryOrdersController {
   ) {
     return this.orders.reconcileFromSession(user.id, reference, body.sessionId);
   }
+
+  /**
+   * Validate a promo code against the customer's current cart and
+   * return the resolved discount. Drives the "Apply code" affordance
+   * on the cart page so the customer sees the saving before they
+   * commit at checkout. Throttle is generous on purpose — a customer
+   * trying a few codes from emails shouldn't get rate-limited — but
+   * tight enough to short-circuit any brute-force probe of the
+   * unguessable-code space.
+   */
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Post("promo/preview")
+  @HttpCode(200)
+  async previewPromo(
+    @Body() body: { code?: string },
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.orders.previewPromoCode(user.id, body?.code ?? "");
+  }
 }

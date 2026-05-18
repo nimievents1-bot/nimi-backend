@@ -7,7 +7,16 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
-import { IsOptional, IsString, Length, Matches, MaxLength } from "class-validator";
+import {
+  IsInt,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+} from "class-validator";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
@@ -57,6 +66,28 @@ export class UpdateProfileDto {
   @Length(2, 2, { message: "Country code must be exactly two letters (e.g. GB)." })
   @Matches(/^[A-Za-z]{2}$/, { message: "Country code must be two letters (e.g. GB)." })
   addressCountry?: string;
+
+  /**
+   * Day of birthday (1–31). Optional, but if provided must be paired
+   * with `birthMonth`. We deliberately do NOT collect year so the row
+   * never carries age-PII. The service validates the day/month pair
+   * yields a real calendar date (e.g. rejects 31 Feb) before persisting.
+   *
+   * Sending `null` (rather than omitting) explicitly clears the saved
+   * birthday — useful if the customer wants to remove their DOB from
+   * the account after sign-up.
+   */
+  @IsOptional()
+  @IsInt({ message: "Birthday day must be a whole number." })
+  @Min(1, { message: "Birthday day must be 1–31." })
+  @Max(31, { message: "Birthday day must be 1–31." })
+  birthDay?: number | null;
+
+  @IsOptional()
+  @IsInt({ message: "Birthday month must be a whole number." })
+  @Min(1, { message: "Birthday month must be 1–12." })
+  @Max(12, { message: "Birthday month must be 1–12." })
+  birthMonth?: number | null;
 }
 
 /**

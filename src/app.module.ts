@@ -24,6 +24,7 @@ import { ProfileModule } from "./modules/profile/profile.module";
 import { PastryCartModule } from "./modules/pastry-cart/pastry-cart.module";
 import { PastryOrdersModule } from "./modules/pastry-orders/pastry-orders.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
+import { PromoCodesModule } from "./modules/promo-codes/promo-codes.module";
 import { StripeModule } from "./modules/stripe/stripe.module";
 import { TestimonialsModule } from "./modules/testimonials/testimonials.module";
 import { WebhooksModule } from "./modules/webhooks/webhooks.module";
@@ -109,6 +110,7 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
     PastriesModule,
     PastryCartModule,
     PastryOrdersModule,
+    PromoCodesModule,
     AdminModule,
     CronModule,
     WebhooksModule,

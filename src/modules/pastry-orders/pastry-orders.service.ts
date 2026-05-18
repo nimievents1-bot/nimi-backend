@@ -27,6 +27,7 @@ import {
   PASTRY_CART_MIN_MINOR,
 } from "../pastry-cart/pastry-cart.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { PromoCodesService } from "../promo-codes/promo-codes.service";
 import { StripeService } from "../stripe/stripe.service";
 
 import { type StartPastryCheckoutDto } from "./dto/checkout.dto";
@@ -61,6 +62,7 @@ export class PastryOrdersService {
     private readonly cart: PastryCartService,
     private readonly mailer: MailerService,
     private readonly notifications: NotificationsService,
+    private readonly promoCodes: PromoCodesService,
   ) {}
 
   // ---------- checkout ----------
@@ -101,8 +103,29 @@ export class PastryOrdersService {
     }
 
     const subtotalMinor = view.subtotalMinor;
-    const creditApplied = view.applicableCreditMinor;
-    const payable = view.payableMinor;
+    // ---- Promo code resolution (read-only, no mutation here) ----
+    // We compute the discount up-front so credits + Stripe coupon can
+    // both see the post-promo total. The atomic redemption happens
+    // later, inside the order-creation transaction, so we never burn
+    // a code if the order itself fails to persist.
+    let promoPreview: Awaited<ReturnType<PromoCodesService["preview"]>> | null = null;
+    if (dto.promoCode && dto.promoCode.trim().length > 0) {
+      promoPreview = await this.promoCodes.preview({
+        code: dto.promoCode,
+        userId: user.id,
+        subtotalMinor,
+        currency: view.currency,
+      });
+    }
+    const promoDiscount = promoPreview?.discountMinor ?? 0;
+
+    // Promo applies BEFORE credits, so the customer gets their full
+    // advertised percent-off even if credits would have covered the
+    // bill. Credits then fill in whatever's left of the post-promo
+    // subtotal — they can't reduce the payable below £0.
+    const subtotalAfterPromo = Math.max(0, subtotalMinor - promoDiscount);
+    const creditApplied = Math.min(view.applicableCreditMinor, subtotalAfterPromo);
+    const payable = Math.max(0, subtotalAfterPromo - creditApplied);
     const reference = await this.allocateReference();
 
     const origin = publicWebUrl();
@@ -118,8 +141,10 @@ export class PastryOrdersService {
     }));
 
     if (payable === 0) {
-      // Credits cover the whole order — no Stripe needed. Create order
-      // PAID and deduct credits in a single transaction.
+      // Credits (and/or promo) cover the whole order — no Stripe needed.
+      // Create order PAID, deduct credits, and atomically redeem the
+      // promo code, all in one transaction so a half-applied state
+      // can't survive a failure.
       const orderId = await this.db.$transaction(async (tx) => {
         const order = await tx.pastryOrder.create({
           data: {
@@ -131,6 +156,8 @@ export class PastryOrdersService {
             status: PastryOrderStatus.PAID,
             subtotalMinor,
             creditAppliedMinor: creditApplied,
+            promoDiscountMinor: promoDiscount,
+            promoCodeId: promoPreview?.promo.id ?? null,
             totalMinor: 0,
             currency: view.currency,
             shippingLine1: dto.shippingLine1,
@@ -153,24 +180,39 @@ export class PastryOrdersService {
           select: { id: true },
         });
 
-        const txRow = await tx.creditTransaction.create({
-          data: {
+        // Atomically claim the promo code, if any. If two concurrent
+        // checkouts race for the same code, exactly one will succeed
+        // (the failed call throws BadRequest and the whole transaction
+        // rolls back — order, credit row, and cart-clear all undone).
+        if (promoPreview) {
+          await this.promoCodes.redeem({
+            promoId: promoPreview.promo.id,
             userId: user.id,
-            type: CreditTxType.REDEMPTION,
-            amountMinor: -creditApplied,
-            balanceAfter: 0, // recomputed by next aggregate read
-            sourceType: "pastry.order",
-            sourceId: order.id,
-            reason: `Pastry order ${reference}`,
-            createdBy: "system",
-          },
-          select: { id: true },
-        });
+            orderRef: reference,
+            tx,
+          });
+        }
 
-        await tx.pastryOrder.update({
-          where: { id: order.id },
-          data: { creditTransactionId: txRow.id },
-        });
+        if (creditApplied > 0) {
+          const txRow = await tx.creditTransaction.create({
+            data: {
+              userId: user.id,
+              type: CreditTxType.REDEMPTION,
+              amountMinor: -creditApplied,
+              balanceAfter: 0, // recomputed by next aggregate read
+              sourceType: "pastry.order",
+              sourceId: order.id,
+              reason: `Pastry order ${reference}`,
+              createdBy: "system",
+            },
+            select: { id: true },
+          });
+
+          await tx.pastryOrder.update({
+            where: { id: order.id },
+            data: { creditTransactionId: txRow.id },
+          });
+        }
 
         await this.cart.clearForCheckout(user.id, tx);
         return order.id;
@@ -188,50 +230,92 @@ export class PastryOrdersService {
       };
     }
 
-    // Stripe-paid path. Create the order in PENDING_PAYMENT, then create
-    // a Stripe Checkout session whose metadata points back to our order.
-    const order = await this.db.pastryOrder.create({
-      data: {
-        reference,
-        userId: user.id,
-        email: user.email,
-        name: dto.recipientName,
-        phone: dto.phone ?? null,
-        status: PastryOrderStatus.PENDING_PAYMENT,
-        subtotalMinor,
-        creditAppliedMinor: creditApplied,
-        totalMinor: payable,
-        currency: view.currency,
-        shippingLine1: dto.shippingLine1,
-        shippingLine2: dto.shippingLine2 ?? null,
-        shippingCity: dto.shippingCity,
-        shippingPostcode: dto.shippingPostcode,
-        shippingCountry: dto.shippingCountry ?? "GB",
-        notes: dto.notes ?? null,
-        items: {
-          create: view.lines.map((line, idx) => ({
-            pastryItemId: line.itemId,
-            itemSnapshot: itemSnapshots[idx]! as Prisma.InputJsonValue,
-            quantity: line.quantity,
-            unitPriceMinor: line.unitPriceMinor,
-            totalMinor: line.lineTotalMinor,
-          })),
+    // Stripe-paid path. Create the order in PENDING_PAYMENT *and*
+    // atomically claim the promo code in one transaction. If the
+    // promo redemption fails (race with another checkout), the order
+    // never gets a row in the DB and the customer sees a clean
+    // BadRequest. We do the redemption here, BEFORE the Stripe API
+    // call, because rolling back a Stripe Checkout session is far
+    // messier than rolling back our own transaction.
+    const order = await this.db.$transaction(async (tx) => {
+      const row = await tx.pastryOrder.create({
+        data: {
+          reference,
+          userId: user.id,
+          email: user.email,
+          name: dto.recipientName,
+          phone: dto.phone ?? null,
+          status: PastryOrderStatus.PENDING_PAYMENT,
+          subtotalMinor,
+          creditAppliedMinor: creditApplied,
+          promoDiscountMinor: promoDiscount,
+          promoCodeId: promoPreview?.promo.id ?? null,
+          totalMinor: payable,
+          currency: view.currency,
+          shippingLine1: dto.shippingLine1,
+          shippingLine2: dto.shippingLine2 ?? null,
+          shippingCity: dto.shippingCity,
+          shippingPostcode: dto.shippingPostcode,
+          shippingCountry: dto.shippingCountry ?? "GB",
+          notes: dto.notes ?? null,
+          items: {
+            create: view.lines.map((line, idx) => ({
+              pastryItemId: line.itemId,
+              itemSnapshot: itemSnapshots[idx]! as Prisma.InputJsonValue,
+              quantity: line.quantity,
+              unitPriceMinor: line.unitPriceMinor,
+              totalMinor: line.lineTotalMinor,
+            })),
+          },
         },
-      },
-      select: { id: true },
+        select: { id: true },
+      });
+      if (promoPreview) {
+        await this.promoCodes.redeem({
+          promoId: promoPreview.promo.id,
+          userId: user.id,
+          orderRef: reference,
+          tx,
+        });
+      }
+      return row;
     });
 
-    // Pre-create the credit coupon (if any) BEFORE the sessions.create call
-    // so a coupon failure surfaces as its own typed error and doesn't get
-    // tangled in the session-creation try/catch.
-    const couponId = creditApplied > 0
-      ? await this.ensureSessionCoupon(creditApplied, view.currency).catch((err: unknown) => {
+    // Pre-create the discount coupon BEFORE the sessions.create call so
+    // a coupon failure surfaces as its own typed error and doesn't get
+    // tangled in the session-creation try/catch. Stripe Checkout
+    // accepts at most one discount per session, so we bundle the
+    // Indulgence Credit AND the promo discount into a single coupon
+    // with a combined amount and a descriptive name. The on-page
+    // breakdown the customer sees on Stripe still shows the
+    // line-item subtotal then "- £X" — they get the right number;
+    // our PastryOrder rows store the breakdown for the receipt.
+    const totalCouponMinor = creditApplied + promoDiscount;
+    const couponLabel = (() => {
+      if (creditApplied > 0 && promoDiscount > 0) {
+        return `Indulgence Credit + Promo Code`;
+      }
+      if (creditApplied > 0) return `Indulgence Credit`;
+      return `Promo Code`;
+    })();
+    const couponId = totalCouponMinor > 0
+      ? await this.ensureSessionCoupon(
+          totalCouponMinor,
+          view.currency,
+          couponLabel,
+        ).catch((err: unknown) => {
           this.logger.error(
-            { err, orderId: order.id, creditApplied, currency: view.currency },
-            "Failed to create Stripe credit coupon",
+            {
+              err,
+              orderId: order.id,
+              creditApplied,
+              promoDiscount,
+              currency: view.currency,
+            },
+            "Failed to create Stripe discount coupon",
           );
           throw new ServiceUnavailableException(
-            "We couldn't apply your Indulgence Credit. Please try again in a moment.",
+            "We couldn't apply your discount. Please try again in a moment.",
           );
         })
       : null;
@@ -449,6 +533,52 @@ export class PastryOrdersService {
     });
 
     return { url: session.url, orderId: order.id, reference };
+  }
+
+  // ---------- promo preview (cart UI) ----------
+
+  /**
+   * Validate a promo code against the user's current cart WITHOUT
+   * mutating any state. Drives the cart-page "Apply code" button so
+   * the customer sees the discount land before they commit to
+   * checkout. The actual atomic redemption happens later, inside
+   * `startCheckout`, so the customer can change their mind without
+   * burning the code.
+   *
+   * Returns the resolved `discountMinor` so the cart can show a
+   * post-discount total side-by-side with the subtotal.
+   */
+  async previewPromoCode(
+    userId: string,
+    code: string,
+  ): Promise<{
+    code: string;
+    discountMinor: number;
+    subtotalMinor: number;
+    payableAfterPromoMinor: number;
+    appliedCreditAfterPromoMinor: number;
+    currency: string;
+  }> {
+    const view = await this.cart.view(userId);
+    if (view.lines.length === 0) {
+      throw new BadRequestException("Your cart is empty — add an item before applying a code.");
+    }
+    const preview = await this.promoCodes.preview({
+      code,
+      userId,
+      subtotalMinor: view.subtotalMinor,
+      currency: view.currency,
+    });
+    const subtotalAfter = Math.max(0, view.subtotalMinor - preview.discountMinor);
+    const credit = Math.min(view.applicableCreditMinor, subtotalAfter);
+    return {
+      code: preview.promo.code,
+      discountMinor: preview.discountMinor,
+      subtotalMinor: view.subtotalMinor,
+      payableAfterPromoMinor: Math.max(0, subtotalAfter - credit),
+      appliedCreditAfterPromoMinor: credit,
+      currency: view.currency,
+    };
   }
 
   // ---------- webhook ----------
@@ -929,16 +1059,27 @@ export class PastryOrdersService {
   }
 
   /**
-   * Stripe coupons are simpler than discount codes for ad-hoc fixed-amount
-   * discounts. We create a one-off coupon valid for this session only,
-   * named after the credit amount.
+   * Stripe coupons are simpler than promotion codes for ad-hoc
+   * fixed-amount discounts. We create a one-off coupon valid for this
+   * session only, named after what's being discounted. The `label`
+   * parameter is what shows up on Stripe's hosted Checkout page — keep
+   * it human-readable because it's literally what the customer reads
+   * next to the line "- £X".
+   *
+   * Used for both Indulgence Credit (no promo) and the combined
+   * Indulgence + promo discount when a customer applies both at once.
+   * Stripe enforces a single-discount-per-session limit, so we bundle.
    */
-  private async ensureSessionCoupon(amountMinor: number, currency: string): Promise<string> {
+  private async ensureSessionCoupon(
+    amountMinor: number,
+    currency: string,
+    label: string = "Indulgence Credit",
+  ): Promise<string> {
     const coupon = await this.stripe.sdk.coupons.create({
       amount_off: amountMinor,
       currency,
       duration: "once",
-      name: `Indulgence Credit (${currency.toUpperCase()} ${(amountMinor / 100).toFixed(2)})`,
+      name: `${label} (${currency.toUpperCase()} ${(amountMinor / 100).toFixed(2)})`,
     });
     return coupon.id;
   }
@@ -990,7 +1131,15 @@ export class PastryOrdersService {
       return;
     }
 
-    void this.sendPaidEmail(order.email, order.name, order.reference, order.totalMinor);
+    void this.sendPaidEmail({
+      to: order.email,
+      recipientName: order.name,
+      reference: order.reference,
+      totalMinor: order.totalMinor,
+      creditAppliedMinor: order.creditAppliedMinor,
+      promoDiscountMinor: order.promoDiscountMinor,
+      currency: order.currency,
+    });
     void this.sendAdminPaidEmail(order);
 
     // In-app notifications. Customer sees their own confirmation in the
@@ -1029,6 +1178,8 @@ export class PastryOrdersService {
     totalMinor: number;
     subtotalMinor: number;
     creditAppliedMinor: number;
+    promoDiscountMinor: number;
+    promoCodeId: string | null;
     currency: string;
     shippingLine1: string;
     shippingLine2: string | null;
@@ -1058,6 +1209,20 @@ export class PastryOrdersService {
         };
       });
 
+      // Resolve the promo code string (if any) so the admin email
+      // can show the human code rather than just an opaque id. We
+      // look it up here rather than including a relation in the
+      // earlier `findUnique` because the join is only useful for
+      // this one email send.
+      let promoCode: string | null = null;
+      if (order.promoCodeId) {
+        const row = await this.db.promoCode.findUnique({
+          where: { id: order.promoCodeId },
+          select: { code: true },
+        });
+        promoCode = row?.code ?? null;
+      }
+
       const tpl = pastryOrderAdminNotifyTemplate({
         reference: order.reference,
         customerName: order.name,
@@ -1066,6 +1231,8 @@ export class PastryOrdersService {
         totalMinor: order.totalMinor,
         subtotalMinor: order.subtotalMinor,
         creditAppliedMinor: order.creditAppliedMinor,
+        promoDiscountMinor: order.promoDiscountMinor,
+        promoCode,
         currency: order.currency,
         shippingLine1: order.shippingLine1,
         shippingLine2: order.shippingLine2,
@@ -1098,27 +1265,35 @@ export class PastryOrdersService {
    * Stripe sends its own receipt; this complements it with a brand
    * touchpoint and the reference number front-and-centre.
    */
-  private async sendPaidEmail(
-    to: string,
-    recipientName: string,
-    reference: string,
-    totalMinor: number,
-  ): Promise<void> {
+  private async sendPaidEmail(opts: {
+    to: string;
+    recipientName: string;
+    reference: string;
+    totalMinor: number;
+    creditAppliedMinor: number;
+    promoDiscountMinor: number;
+    currency: string;
+  }): Promise<void> {
     try {
       const tpl = pastryOrderConfirmedTemplate({
-        recipientName,
-        reference,
-        totalMinor,
-        currency: "gbp",
-        orderUrl: `${publicWebUrl()}/account/orders/${encodeURIComponent(reference)}`,
+        recipientName: opts.recipientName,
+        reference: opts.reference,
+        totalMinor: opts.totalMinor,
+        creditAppliedMinor: opts.creditAppliedMinor,
+        promoDiscountMinor: opts.promoDiscountMinor,
+        currency: opts.currency,
+        orderUrl: `${publicWebUrl()}/account/orders/${encodeURIComponent(opts.reference)}`,
       });
       await this.mailer.send({
-        to,
+        to: opts.to,
         ...tpl,
         tag: "pastry-order-confirmed",
       });
     } catch (err) {
-      this.logger.error({ err, reference }, "Pastry order confirmation email failed");
+      this.logger.error(
+        { err, reference: opts.reference },
+        "Pastry order confirmation email failed",
+      );
     }
   }
 
