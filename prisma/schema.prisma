@@ -408,6 +408,16 @@ model GiftOrder {
   notes         String?
   internalNotes String?
 
+  /// The customer ticked the "I accept that final designs must be
+  /// approved before production starts" checkbox at checkout. PRD-required
+  /// for every paid gift order. Defaults to false for historical rows that
+  /// pre-date the field; the API now refuses checkout without it.
+  designApprovalAccepted Boolean @default(false)
+
+  /// Optional carrier tracking number, populated by admin when the order
+  /// transitions to SHIPPED.
+  trackingNumber String?
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   paidAt      DateTime?

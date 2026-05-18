@@ -1,5 +1,6 @@
 import { Type } from "class-transformer";
 import {
+  Equals,
   IsEmail,
   IsEnum,
   IsInt,
@@ -59,6 +60,18 @@ export class CreateCheckoutSessionDto {
   /** Honeypot. */
   @IsOptional() @IsString() @MaxLength(0, { message: "Suspicious submission." })
   website?: string;
+
+  /**
+   * PRD-required: the customer must explicitly accept that designs need
+   * approval before production starts. We refuse checkout if this isn't
+   * `true` — anything else (false, undefined, missing) trips the
+   * boolean validator and the form re-renders with an error.
+   */
+  @Equals(true, {
+    message:
+      "Please confirm that designs need to be approved before production begins.",
+  })
+  designApprovalAccepted!: boolean;
 }
 
 export enum AdminOrderStatusDto {

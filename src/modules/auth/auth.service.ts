@@ -250,9 +250,54 @@ export class AuthService {
   // ---------- password reset ----------
 
   async forgotPassword(email: string, meta: RequestMeta): Promise<{ ok: true }> {
-    // Anti-enumeration: always succeed.
+    // Anti-enumeration: always return success to the caller, regardless
+    // of whether the email matches a real account. The throttler on the
+    // controller already caps per-IP requests; the per-email cooldown
+    // below caps per-account spam so a rotating-IP attacker can't flood
+    // a target's inbox with reset emails.
     const user = await this.db.user.findUnique({ where: { email: email.toLowerCase() } });
     if (user && !user.deletedAt) {
+      // Per-email cooldown — if we sent a reset email to this user
+      // within the last 60 seconds, silently no-op. Anti-enumeration
+      // is preserved because we still return `{ ok: true }`. The
+      // legitimate user only sees one email per minute even if they
+      // mash "Send reset link"; an attacker can't use this endpoint
+      // as a free email-spam cannon.
+      const RECENT_COOLDOWN_MS = 60 * 1000;
+      const recent = await this.db.passwordResetToken.findFirst({
+        where: {
+          userId: user.id,
+          createdAt: { gte: new Date(Date.now() - RECENT_COOLDOWN_MS) },
+        },
+        select: { id: true },
+      });
+      if (recent) {
+        // Audit the dropped attempt for visibility, but don't tell the
+        // caller anything different.
+        await this.audit(
+          "auth.password-reset.cooldown",
+          "User",
+          user.id,
+          user.id,
+          meta,
+        );
+        return { ok: true };
+      }
+
+      // Invalidate any existing unused reset tokens for this user
+      // before minting the new one. Otherwise a stale link from an
+      // earlier email stays valid for up to 15 minutes — if it leaks,
+      // an attacker can still use it. Marking them used (rather than
+      // deleting) keeps the audit trail intact.
+      await this.db.passwordResetToken.updateMany({
+        where: {
+          userId: user.id,
+          usedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        data: { usedAt: new Date() },
+      });
+
       const token = newSecureToken();
       const hash = sha256(token);
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 min

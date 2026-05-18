@@ -35,6 +35,26 @@ export class CustomerOrdersController {
     return rows.map(this.public);
   }
 
+  /**
+   * Auth-gated single-order lookup. Drives `/account/orders/gift/[ref]`.
+   * Ownership-checked server-side: the service refuses to return an
+   * order whose `userId` doesn't match the signed-in caller, even if
+   * the reference is correct. This is the path we want customers to
+   * use once they have an account — the public `by-reference` form
+   * below only exists for the post-checkout success page where the
+   * customer hasn't signed in yet.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get("me/:reference")
+  async byReferenceAuthed(
+    @Param("reference") reference: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    if (!/^NIMI-\d{4}-\d{4,8}$/.test(reference)) throw new NotFoundException();
+    const row = await this.gifting.getCustomerOrderByReference(reference, user.id, null);
+    return this.public(row);
+  }
+
   @Public()
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Get("by-reference/:reference")

@@ -15,8 +15,14 @@ import {
 } from "@prisma/client";
 import type Stripe from "stripe";
 
-import { publicWebUrl } from "../../config/env";
+import { getEnv, publicWebUrl } from "../../config/env";
 import { TurnstileService } from "../contact/turnstile.service";
+import {
+  giftOrderAdminNotifyTemplate,
+  giftOrderReceiptTemplate,
+} from "../mailer/gift-templates";
+import { MailerService } from "../mailer/mailer.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { StripeService } from "../stripe/stripe.service";
 
@@ -142,6 +148,8 @@ export class GiftingService implements OnModuleInit {
     private readonly db: PrismaService,
     private readonly stripe: StripeService,
     private readonly turnstile: TurnstileService,
+    private readonly mailer: MailerService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -261,6 +269,12 @@ export class GiftingService implements OnModuleInit {
         totalMinor,
         currency: collection.currency,
         notes: dto.notes?.trim() ?? null,
+        // Persist the design-approval acknowledgement (PRD §7.4.3).
+        // The DTO refuses checkout when this is anything other than
+        // `true`, so the column is always `true` for a paid order —
+        // but we store the exact value so an audit can confirm the
+        // customer explicitly opted in.
+        designApprovalAccepted: dto.designApprovalAccepted,
         items: {
           create: [
             {
@@ -367,6 +381,12 @@ export class GiftingService implements OnModuleInit {
           typeof session.payment_intent === "string" ? session.payment_intent : null,
       },
     });
+
+    // Fire-and-forget: customer receipt + admin notification + staff
+    // in-app bell. Idempotent against webhook retries because the
+    // status check at the top of this method (PENDING_PAYMENT only)
+    // early-returns on the second invocation.
+    void this.dispatchPaidNotifications(orderId);
   }
 
   /**
@@ -381,7 +401,7 @@ export class GiftingService implements OnModuleInit {
     if (!orderId) return;
 
     if (eventType.endsWith("succeeded")) {
-      await this.db.giftOrder.updateMany({
+      const result = await this.db.giftOrder.updateMany({
         where: { id: orderId, status: GiftOrderStatus.PENDING_PAYMENT },
         data: {
           status: GiftOrderStatus.AWAITING_DESIGN_APPROVAL,
@@ -390,6 +410,13 @@ export class GiftingService implements OnModuleInit {
             typeof session.payment_intent === "string" ? session.payment_intent : null,
         },
       });
+      // Only fire notifications when the update actually transitioned
+      // a row — Stripe sends async-succeeded as well as the original
+      // session.completed for the same order, so an idempotency guard
+      // here prevents double email + double bell.
+      if (result.count > 0) {
+        void this.dispatchPaidNotifications(orderId);
+      }
     } else {
       await this.db.giftOrder.updateMany({
         where: { id: orderId, status: GiftOrderStatus.PENDING_PAYMENT },
@@ -515,6 +542,154 @@ export class GiftingService implements OnModuleInit {
    * we'd swap this for a Postgres SEQUENCE (defined in a migration), but
    * keeping it in app code keeps the schema portable.
    */
+  /**
+   * Fire-and-forget dispatcher for the three notifications that go out
+   * the moment a gift order moves to AWAITING_DESIGN_APPROVAL:
+   *
+   *   1. **Customer receipt** — confirms the order, includes the
+   *      reference and a link to their account page so they can find
+   *      it again later. Mock-up arrives via a separate email when
+   *      the admin advances the status to DESIGN_SENT.
+   *
+   *   2. **Admin notification** — to `SUPPORT_INBOX`, with the full
+   *      payload the kitchen needs to prepare the design: customer
+   *      contact details, every item + customisation (names, dates,
+   *      colour theme, message, logo URL if attached), delivery
+   *      address, customer notes, and a one-click link to the admin
+   *      order page.
+   *
+   *   3. **Staff in-app notification** — one row per OWNER/EDITOR/
+   *      SUPPORT user, so the team sees the new order in their bell
+   *      dropdown even if the email lands in spam.
+   *
+   * All three are non-blocking; failures are logged and swallowed so
+   * a transient mail/notification hiccup can never undo a successful
+   * payment.
+   */
+  private async dispatchPaidNotifications(orderId: string): Promise<void> {
+    let order;
+    try {
+      order = await this.db.giftOrder.findUnique({
+        where: { id: orderId },
+        include: {
+          items: {
+            orderBy: { createdAt: "asc" },
+            include: { collection: { select: { name: true } } },
+          },
+          user: {
+            select: {
+              phone: true,
+              addressLine1: true,
+              addressLine2: true,
+              addressCity: true,
+              addressPostcode: true,
+              addressCountry: true,
+            },
+          },
+        },
+      });
+    } catch (err) {
+      this.logger.error({ err, orderId }, "Failed to load gift order for notifications");
+      return;
+    }
+    if (!order) {
+      this.logger.warn({ orderId }, "Gift order vanished before notifications could be sent");
+      return;
+    }
+
+    const origin = publicWebUrl();
+    const customerUrl = `${origin}/account/orders/gift/${encodeURIComponent(order.reference)}`;
+    const adminUrl = `${origin}/admin/orders/${encodeURIComponent(order.id)}`;
+
+    // --- Customer receipt ---
+    try {
+      const tpl = giftOrderReceiptTemplate({
+        customerName: order.name,
+        reference: order.reference,
+        totalMinor: order.totalMinor,
+        currency: order.currency,
+        orderUrl: customerUrl,
+      });
+      await this.mailer.send({
+        to: order.email,
+        ...tpl,
+        tag: "gift-order-confirmed",
+      });
+    } catch (err) {
+      this.logger.error({ err, reference: order.reference }, "Gift receipt email failed");
+    }
+
+    // --- Admin notification ---
+    // Prefer the saved profile address when the order doesn't carry
+    // its own shipping fields yet. The current checkout doesn't
+    // collect shipping per-order (the design flow asks for it later);
+    // the profile address is the team's best signal for now.
+    const shipping = {
+      line1: order.shippingLine1 ?? order.user?.addressLine1 ?? null,
+      line2: order.shippingLine2 ?? order.user?.addressLine2 ?? null,
+      city: order.shippingCity ?? order.user?.addressCity ?? null,
+      postcode: order.shippingPostcode ?? order.user?.addressPostcode ?? null,
+      country: order.shippingCountry ?? order.user?.addressCountry ?? null,
+    };
+    try {
+      const env = getEnv();
+      const tpl = giftOrderAdminNotifyTemplate({
+        reference: order.reference,
+        customerName: order.name,
+        customerEmail: order.email,
+        customerPhone: order.user?.phone ?? null,
+        totalMinor: order.totalMinor,
+        currency: order.currency,
+        shippingLine1: shipping.line1,
+        shippingLine2: shipping.line2,
+        shippingCity: shipping.city,
+        shippingPostcode: shipping.postcode,
+        shippingCountry: shipping.country,
+        notes: order.notes,
+        designApprovalAccepted: order.designApprovalAccepted,
+        items: order.items.map((item) => {
+          const snap = (item.collectionSnapshot ?? {}) as { name?: string };
+          const cust = (item.customisation ?? null) as
+            | {
+                names?: string | null;
+                dates?: string | null;
+                colourTheme?: string | null;
+                message?: string | null;
+                logoUrl?: string | null;
+              }
+            | null;
+          return {
+            collectionName: item.collection?.name ?? snap.name ?? "Gift collection",
+            quantity: item.quantity,
+            unitPriceMinor: item.unitPriceMinor,
+            totalMinor: item.totalMinor,
+            customisation: cust,
+          };
+        }),
+        adminUrl,
+      });
+      await this.mailer.send({
+        to: env.SUPPORT_INBOX,
+        replyTo: order.email,
+        ...tpl,
+        tag: "gift-order-admin-notify",
+      });
+    } catch (err) {
+      this.logger.error({ err, reference: order.reference }, "Gift admin notify email failed");
+    }
+
+    // --- Staff in-app notification ---
+    void this.notifications.notifyStaff({
+      kind: "contact.enquiry.new", // closest existing kind; gift type
+                                   // can be added to NotificationKind in
+                                   // a future round if you want
+                                   // bell-dropdown filtering.
+      title: `New gift order ${order.reference} from ${order.name}`,
+      body: `${order.currency.toUpperCase()} ${(order.totalMinor / 100).toFixed(2)} · ${order.items.length} item${order.items.length === 1 ? "" : "s"}`,
+      href: `/admin/orders/${order.id}`,
+    });
+  }
+
   private async allocateReference(): Promise<string> {
     const year = new Date().getUTCFullYear();
     const marker = await this.db.$transaction(async (tx) => {
