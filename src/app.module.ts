@@ -20,6 +20,7 @@ import { MailerModule } from "./modules/mailer/mailer.module";
 import { NewsletterModule } from "./modules/newsletter/newsletter.module";
 import { NotificationsModule } from "./modules/notifications/notifications.module";
 import { PastriesModule } from "./modules/pastries/pastries.module";
+import { ProfileModule } from "./modules/profile/profile.module";
 import { PastryCartModule } from "./modules/pastry-cart/pastry-cart.module";
 import { PastryOrdersModule } from "./modules/pastry-orders/pastry-orders.module";
 import { PrismaModule } from "./modules/prisma/prisma.module";
@@ -104,6 +105,7 @@ import { WebhooksModule } from "./modules/webhooks/webhooks.module";
     BlogModule,
     TestimonialsModule,
     NotificationsModule,
+    ProfileModule,
     PastriesModule,
     PastryCartModule,
     PastryOrdersModule,

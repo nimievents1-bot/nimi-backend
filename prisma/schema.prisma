@@ -43,6 +43,24 @@ model User {
   /// Month of birthday (1–12). Optional, paired with `birthDay`.
   birthMonth Int?
 
+  // ------------------------------------------------------------------
+  // Default delivery address.
+  // ------------------------------------------------------------------
+  // Stored at the user level rather than the order level so the operator
+  // can ship recurring deliveries (Indulgence Club, gifting, etc.)
+  // without having to wait for the customer to enter an address per
+  // event. Also pre-fills the pastry checkout so a returning customer
+  // doesn't retype their details. All fields are optional — a customer
+  // can sign up, browse, and only fill these in when they actually need
+  // a delivery.
+  addressLine1 String?
+  addressLine2 String?
+  addressCity  String?
+  addressPostcode String?
+  /// ISO-3166 alpha-2 country code. Defaults to GB on save when blank
+  /// because v1 only ships within the UK.
+  addressCountry String?
+
   failedLoginCount Int       @default(0)
   lockedUntil      DateTime?
 

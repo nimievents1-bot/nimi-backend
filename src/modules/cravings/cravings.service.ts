@@ -415,7 +415,24 @@ export class CravingsService implements OnModuleInit {
         orderBy: { createdAt: "desc" },
         take: limit,
         skip: offset,
-        include: { user: { select: { email: true, name: true } }, plan: true },
+        include: {
+          user: {
+            select: {
+              email: true,
+              name: true,
+              phone: true,
+              // Surface the default delivery address so the admin
+              // table can show where to ship the monthly package
+              // without having to drill into each profile.
+              addressLine1: true,
+              addressLine2: true,
+              addressCity: true,
+              addressPostcode: true,
+              addressCountry: true,
+            },
+          },
+          plan: true,
+        },
       }),
       this.db.subscription.count({ where }),
     ]);
