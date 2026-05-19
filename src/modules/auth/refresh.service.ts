@@ -2,9 +2,21 @@ import { randomUUID } from "node:crypto";
 
 import { Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 
+import { getEnv } from "../../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 
 import { newSecureToken, sha256 } from "./token.util";
+
+/**
+ * Resolve the refresh-token TTL from env in milliseconds. Stored in
+ * env as seconds (`JWT_REFRESH_TTL`, default ~10 years) so DB row
+ * expiry stays in lockstep with the cookie's `Max-Age`. Operator policy
+ * is sessions-never-expire-on-their-own, which only holds end-to-end
+ * if both layers agree.
+ */
+function refreshTtlMs(): number {
+  return getEnv().JWT_REFRESH_TTL * 1000;
+}
 
 interface IssueArgs {
   userId: string;
@@ -44,7 +56,11 @@ export class RefreshService {
     const token = newSecureToken();
     const hash = sha256(token);
     const family = familyId ?? randomUUID();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    // Lock the DB row's expiry to the cookie's Max-Age. Earlier this
+    // was hardcoded to 30 days, which silently capped sessions long
+    // before the 10-year cookie expired — undermining the operator's
+    // "stay signed in until you sign out" policy.
+    const expiresAt = new Date(Date.now() + refreshTtlMs());
 
     await this.db.refreshToken.create({
       data: {
@@ -91,7 +107,10 @@ export class RefreshService {
       });
 
       const token = newSecureToken();
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      // Extend the rotated row's lifetime by the full TTL so every
+      // refresh effectively renews the session — that's what lets a
+      // returning visitor stay signed in indefinitely.
+      const expiresAt = new Date(Date.now() + refreshTtlMs());
 
       await tx.refreshToken.create({
         data: {
