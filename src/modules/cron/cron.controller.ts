@@ -40,6 +40,23 @@ export class CronController {
     return { ok: true, ...result };
   }
 
+  /**
+   * Daily credit-maintenance sweep. Two responsibilities, one walk:
+   *   - Forfeit any portion of ACCRUAL rows whose 3-month validity
+   *     has elapsed and which redemptions haven't already covered.
+   *   - Send a "credits expiring soon" heads-up email for accruals
+   *     whose deadline is inside the next CREDIT_EXPIRING_NOTICE_DAYS.
+   * Recommended schedule: 03:00 UTC daily (before customers wake up
+   * so the forfeit is settled before they next check their balance).
+   */
+  @Post("credits-maintenance")
+  @HttpCode(200)
+  async creditsMaintenance(@Headers("x-cron-secret") secret?: string) {
+    this.assertAuthorised(secret);
+    const result = await this.cron.runCreditMaintenanceJob();
+    return { ok: true, ...result };
+  }
+
   /** Constant-time comparison so secret-length isn't leaked via timing. */
   private assertAuthorised(presented: string | undefined): void {
     const env = getEnv();

@@ -137,6 +137,17 @@ export function emailShell(inner: string, opts: ShellOptions): string {
                 </div>
                 <div>Catering · Event planning · Gifting · The Indulgence Club</div>
                 <div style="margin-top:6px;">United Kingdom · <a href="https://nimievents.com" style="color:${BRAND_COLOURS.orange600};text-decoration:none;">nimievents.com</a></div>
+                <!-- Social — text-only handles. Most email clients block
+                     remote images by default, and SVG icons inside email
+                     html render unreliably across Outlook/Apple Mail, so
+                     we render plain typographic links here. The footer
+                     band stays readable even when nothing else loads. -->
+                <div style="margin-top:6px;">
+                  Follow us:
+                  <a href="https://www.instagram.com/nimi_events" style="color:${BRAND_COLOURS.orange600};text-decoration:none;margin-left:4px;">Instagram</a>
+                  ·
+                  <a href="https://www.tiktok.com/@nimi.events" style="color:${BRAND_COLOURS.orange600};text-decoration:none;">TikTok</a>
+                </div>
               </td>
             </tr>
 

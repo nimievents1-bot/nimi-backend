@@ -280,6 +280,229 @@ export class CronService {
     this.logger.log({ today, candidates, sent, skipped }, "Credits reminder cron run");
     return { candidates, sent, skipped };
   }
+
+  // ---------- credit maintenance (expiry sweep + heads-up email) ----------
+
+  /**
+   * Daily credit-maintenance pass. Does two things in one walk, since
+   * both need the same per-user accrual data:
+   *
+   *   1. **Expiry sweep.** For each user, find ACCRUAL rows whose
+   *      `expiresAt` is in the past. Use the aggregate FIFO math
+   *      `unspent_expired = max(0, expired_total − redeemed_total −
+   *      previous_expiries)` to compute how much should still be
+   *      forfeited, and write a single EXPIRY transaction with the
+   *      negated amount. The per-day `sourceId = expiry-<YYYY-MM-DD>`
+   *      combined with the DB's `@@unique([userId, sourceType,
+   *      sourceId])` guarantees idempotency — re-running the same
+   *      day's sweep is a no-op (a unique-violation we swallow).
+   *
+   *   2. **Heads-up email.** For each user with ACCRUAL rows whose
+   *      `expiresAt` falls inside the next `CREDIT_EXPIRING_NOTICE_DAYS`,
+   *      send one "credits expiring soon" email per accrual batch.
+   *      We dedupe per-accrual via an `auditLog` row keyed on the
+   *      accrual id, so the same batch is never warned about twice
+   *      even across cron re-runs.
+   *
+   * Why both in one job: the data they need (accruals per user, with
+   * `expiresAt`) is the same; running them together avoids two
+   * separate full-table walks. The expiry sweep runs first so the
+   * heads-up email isn't sent for a batch we've already forfeited.
+   *
+   * Idempotent on each pass — safe to call multiple times in a day.
+   */
+  async runCreditMaintenanceJob(now: Date = new Date()): Promise<{
+    expired: { users: number; forfeitedMinor: number };
+    expiringSoon: { sent: number; skipped: number };
+  }> {
+    const today = isoDate(now);
+
+    // ---- 1. Expiry sweep ----
+    // Find users with at least one ACCRUAL whose expiresAt is already
+    // in the past. We start from this set so we never scan users who
+    // can't possibly need a forfeit.
+    const expiredUserGroups = await this.db.creditTransaction.groupBy({
+      by: ["userId"],
+      where: {
+        type: CreditTxType.ACCRUAL,
+        expiresAt: { lt: now, not: null },
+      },
+      _sum: { amountMinor: true },
+    });
+
+    let usersAffected = 0;
+    let totalForfeitedMinor = 0;
+
+    for (const group of expiredUserGroups) {
+      const userId = group.userId;
+      const expiredAccrued = group._sum.amountMinor ?? 0;
+      if (expiredAccrued <= 0) continue;
+
+      // Total redemptions over the user's lifetime (REDEMPTION rows
+      // carry a NEGATIVE amountMinor, so we negate the sum to get a
+      // positive magnitude). REFUND is excluded because a refund
+      // restores credit (it's positive) — it shouldn't increase the
+      // forfeit basis.
+      const redemptionAgg = await this.db.creditTransaction.aggregate({
+        where: { userId, type: CreditTxType.REDEMPTION },
+        _sum: { amountMinor: true },
+      });
+      const redeemedTotal = Math.abs(redemptionAgg._sum.amountMinor ?? 0);
+
+      // Sum of previous monthly-expiry forfeits (negative amounts;
+      // negate for magnitude). We deliberately scope by `sourceType`
+      // so the post-cancellation grace-expiry rows aren't conflated
+      // with the monthly sweep.
+      const previousExpiryAgg = await this.db.creditTransaction.aggregate({
+        where: {
+          userId,
+          type: CreditTxType.EXPIRY,
+          sourceType: "system.expiry-monthly",
+        },
+        _sum: { amountMinor: true },
+      });
+      const previouslyExpired = Math.abs(previousExpiryAgg._sum.amountMinor ?? 0);
+
+      // FIFO math (see method-level docs). Clamp at 0 so a customer
+      // who redeemed more than they accrued (somehow — e.g. an
+      // admin adjustment offset) never sees a positive "forfeit".
+      const unspentExpired = Math.max(
+        0,
+        expiredAccrued - redeemedTotal - previouslyExpired,
+      );
+      if (unspentExpired <= 0) continue;
+
+      try {
+        await this.db.creditTransaction.create({
+          data: {
+            userId,
+            type: CreditTxType.EXPIRY,
+            amountMinor: -unspentExpired,
+            // Read the current balance at write time so the running
+            // `balanceAfter` field stays accurate — auditors lean on
+            // this column when reconciling.
+            balanceAfter: await this.computeBalanceMinor(userId).then(
+              (b) => b - unspentExpired,
+            ),
+            sourceType: "system.expiry-monthly",
+            sourceId: `expiry-${today}`,
+            reason: `Three-month validity window — ${unspentExpired} forfeited`,
+            createdBy: "system",
+          },
+        });
+        usersAffected += 1;
+        totalForfeitedMinor += unspentExpired;
+      } catch (err) {
+        const e = err as { code?: string };
+        // P2002 = unique constraint violation, which just means this
+        // user's sweep has already been written for today — exactly
+        // the idempotency we wanted. Swallow it.
+        if (e.code === "P2002") {
+          continue;
+        }
+        this.logger.error(
+          { err, userId, unspentExpired },
+          "Credit expiry write failed for user",
+        );
+      }
+    }
+
+    // ---- 2. Heads-up email for soon-to-expire accruals ----
+    const noticeWindowEnd = new Date(
+      now.getTime() + CronService.CREDIT_EXPIRING_NOTICE_DAYS * 24 * 60 * 60 * 1000,
+    );
+    // Only ACCRUAL rows whose deadline is inside [now, now+N days]
+    // and which haven't already been notice-mailed. The audit-log
+    // marker key includes the accrual id so each batch is warned
+    // about exactly once.
+    const expiringSoon = await this.db.creditTransaction.findMany({
+      where: {
+        type: CreditTxType.ACCRUAL,
+        expiresAt: { gt: now, lt: noticeWindowEnd },
+      },
+      orderBy: { expiresAt: "asc" },
+      select: {
+        id: true,
+        userId: true,
+        amountMinor: true,
+        expiresAt: true,
+        user: { select: { email: true, name: true, deletedAt: true } },
+      },
+    });
+
+    let sentCount = 0;
+    let skippedCount = 0;
+    for (const row of expiringSoon) {
+      if (!row.user || row.user.deletedAt) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const markerAction = `credits.expiring.${row.id}`;
+      const already = await this.db.auditLog.findFirst({
+        where: { entity: "User", entityId: row.userId, action: markerAction },
+        select: { id: true },
+      });
+      if (already) {
+        skippedCount += 1;
+        continue;
+      }
+
+      try {
+        const tpl = indulgenceCreditsExpiringTemplate({
+          firstName: firstNameOf(row.user.name) ?? row.user.name,
+          expiringAmountMinor: row.amountMinor,
+          expiresAt: row.expiresAt ?? noticeWindowEnd,
+          accountUrl: `${publicWebUrl()}/cravings`,
+        });
+        await this.mailer.send({
+          to: row.user.email,
+          ...tpl,
+          tag: "indulgence-credits-expiring",
+        });
+        await this.db.auditLog.create({
+          data: {
+            action: markerAction,
+            entity: "User",
+            entityId: row.userId,
+            actorId: "system",
+          },
+        });
+        sentCount += 1;
+      } catch (err) {
+        this.logger.error(
+          { err, userId: row.userId, accrualId: row.id },
+          "Credit-expiring notice failed for user",
+        );
+        skippedCount += 1;
+      }
+    }
+
+    this.logger.log(
+      {
+        today,
+        expiredUsers: usersAffected,
+        forfeitedMinor: totalForfeitedMinor,
+        noticesSent: sentCount,
+        noticesSkipped: skippedCount,
+      },
+      "Credit maintenance cron run",
+    );
+
+    return {
+      expired: { users: usersAffected, forfeitedMinor: totalForfeitedMinor },
+      expiringSoon: { sent: sentCount, skipped: skippedCount },
+    };
+  }
+
+  /** Sum the user's CreditTransaction ledger to a running balance. */
+  private async computeBalanceMinor(userId: string): Promise<number> {
+    const agg = await this.db.creditTransaction.aggregate({
+      where: { userId },
+      _sum: { amountMinor: true },
+    });
+    return agg._sum.amountMinor ?? 0;
+  }
 }
 
 const pad = (n: number): string => n.toString().padStart(2, "0");
