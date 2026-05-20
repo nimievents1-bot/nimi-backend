@@ -561,7 +561,11 @@ enum CreditTxType {
   ADJUSTMENT
   /// Credit cap reached — overflow forfeited.
   CAP_FORFEIT
-  /// Credit expired N months after subscription cancellation.
+  /// Credit expired — either (a) the per-accrual 3-month validity
+  /// window elapsed without redemption, or (b) the post-cancellation
+  /// grace period ran out. Distinguished by `sourceType`:
+  ///   - `system.expiry-monthly`  → 3-month per-accrual sweep
+  ///   - `system.expiry-cancel`   → post-cancellation grace expiry
   EXPIRY
   /// Refund (negative balance correction).
   REFUND
@@ -587,7 +591,8 @@ model CreditTransaction {
   amountMinor  Int
   /// Running balance after this transaction is applied.
   balanceAfter Int
-  /// E.g. "stripe.invoice", "stripe.refund", "order.refund", "admin", "system.expiry".
+  /// E.g. "stripe.invoice", "stripe.refund", "order.refund", "admin",
+  /// "system.expiry-monthly" (per-accrual 3-month expiry).
   sourceType   String
   /// E.g. invoice id, order id, audit log id.
   sourceId     String?
@@ -595,11 +600,40 @@ model CreditTransaction {
   /// Who initiated the transaction (admin user id, or "system" for automated).
   createdBy    String
 
+  ///
+  /// Per-transaction expiry stamp for the Indulgence Club's
+  /// "credits valid for three months from issue" policy.
+  ///
+  /// Set ONLY on ACCRUAL rows (and any future positive grant that
+  /// the operator wants to age out). The daily credit-maintenance
+  /// cron sweeps ACCRUAL rows where `expiresAt < now`, sums the
+  /// portion not yet covered by REDEMPTION + earlier EXPIRY rows,
+  /// and writes a fresh EXPIRY transaction with the unspent
+  /// remainder negated.
+  ///
+  /// Null means "never expires" — used for:
+  ///   - Existing legacy rows (backward compat; no auto-expiry).
+  ///   - ADJUSTMENT, REFUND, REDEMPTION, CAP_FORFEIT, EXPIRY rows
+  ///     (the expiry concept only applies to positive grants we want
+  ///     to age out, and those are produced by ACCRUAL).
+  ///   - Hand-issued admin grants (`ADJUSTMENT`) — these are usually
+  ///     apology credits and should stick around until used.
+  ///
+  /// Why we keep this on the ledger row rather than computing it on
+  /// the fly from `createdAt`: the operator may want to extend the
+  /// validity window for specific accruals later (e.g. promo periods)
+  /// without rewriting the policy in code.
+  ///
+  expiresAt DateTime?
+
   createdAt DateTime @default(now())
 
   @@unique([userId, sourceType, sourceId])
   @@index([userId, createdAt])
   @@index([type, createdAt])
+  // Hot path for the daily expiry sweep — we scan rows whose expiresAt
+  // is already in the past, partitioned by user.
+  @@index([userId, expiresAt])
 }
 
 // =============================================================

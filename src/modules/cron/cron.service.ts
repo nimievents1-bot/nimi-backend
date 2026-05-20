@@ -1,9 +1,10 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { SubscriptionStatus } from "@prisma/client";
+import { CreditTxType, SubscriptionStatus } from "@prisma/client";
 
 import { publicWebUrl } from "../../config/env";
 import {
   indulgenceBirthdayTemplate,
+  indulgenceCreditsExpiringTemplate,
   indulgenceCreditsReminderTemplate,
 } from "../mailer/indulgence-templates";
 import { MailerService } from "../mailer/mailer.service";
@@ -20,8 +21,9 @@ import { PromoCodesService } from "../promo-codes/promo-codes.service";
  * each run, so triggering twice in a day is safe.
  *
  * Recommended schedule (UTC):
- *   POST /v1/cron/birthday-emails       09:00 daily
- *   POST /v1/cron/credits-reminder      10:00 daily
+ *   POST /v1/cron/birthday-emails        09:00 daily
+ *   POST /v1/cron/credits-reminder       10:00 daily
+ *   POST /v1/cron/credits-maintenance    03:00 daily
  *
  * Authentication is a shared secret in the `x-cron-secret` header (see
  * CronController).
@@ -58,6 +60,14 @@ export class CronService {
    * incentive aligned with a real basket.
    */
   private static readonly BIRTHDAY_MIN_SPEND_MINOR = 25_00;
+
+  /**
+   * Heads-up window for "your credits are about to expire" emails.
+   * Seven days gives the customer time to plan an order without
+   * feeling rushed; shorter windows tend to read as ransom notes,
+   * longer windows just get ignored. Adjustable here.
+   */
+  private static readonly CREDIT_EXPIRING_NOTICE_DAYS = 7;
 
   constructor(
     private readonly db: PrismaService,

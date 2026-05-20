@@ -52,6 +52,16 @@ const DEFAULT_CREDIT_CAP_MINOR = 100_000; // £1,000
 const CREDIT_GRACE_MONTHS = 12;
 
 /**
+ * Per-accrual validity window — credits issued in month N are valid
+ * until month N+CREDIT_VALID_MONTHS, then forfeited if unspent. The
+ * Indulgence Club welcome email tells the customer "credits valid for
+ * three months from issue"; this constant is the policy backing that
+ * promise. Stamped onto each ACCRUAL row as `expiresAt`, swept daily
+ * by the `cron/credits-maintenance` job.
+ */
+export const CREDIT_VALID_MONTHS = 3;
+
+/**
  * CravingsService — owns plans, subscriptions, and the credit ledger.
  *
  * Financial-discipline rules:
@@ -715,6 +725,13 @@ export class CravingsService implements OnModuleInit {
       const balanceBefore = before._sum.amountMinor ?? 0;
 
       if (params.type === CreditTxType.ACCRUAL) {
+        // Per-accrual 3-month expiry — the Indulgence Club's
+        // "credits valid for three months from issue" policy. Stamped
+        // here so every accrual carries its own deadline; the daily
+        // credit-maintenance cron will forfeit any unspent remainder
+        // once `expiresAt` is in the past.
+        const accrualExpiresAt = addMonths(new Date(), CREDIT_VALID_MONTHS);
+
         const wouldBe = balanceBefore + params.amountMinor;
         if (wouldBe <= DEFAULT_CREDIT_CAP_MINOR) {
           await tx.creditTransaction.create({
@@ -727,6 +744,7 @@ export class CravingsService implements OnModuleInit {
               sourceId: params.sourceId,
               reason: params.reason,
               createdBy: params.createdBy,
+              expiresAt: accrualExpiresAt,
             },
           });
           return { applied: true, balanceAfter: wouldBe };
@@ -747,6 +765,7 @@ export class CravingsService implements OnModuleInit {
               sourceId: params.sourceId,
               reason: params.reason,
               createdBy: params.createdBy,
+              expiresAt: accrualExpiresAt,
             },
           });
         }

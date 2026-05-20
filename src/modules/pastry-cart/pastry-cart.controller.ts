@@ -15,7 +15,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { type AuthenticatedUser } from "../auth/types";
 
-import { AddToCartDto, UpdateCartItemDto } from "./dto/cart.dto";
+import { AddToCartDto, BulkAddDto, UpdateCartItemDto } from "./dto/cart.dto";
 import { PastryCartService } from "./pastry-cart.service";
 
 /**
@@ -43,6 +43,23 @@ export class PastryCartController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.cart.addItem(user.id, dto);
+  }
+
+  /**
+   * Bulk-add the contents of an anonymous visitor's guest cart into
+   * the now-signed-in user's server cart. Called by the web `/cart`
+   * page right after sign-in/sign-up when it detects a non-empty
+   * localStorage guest cart. The response is the merged cart view
+   * (same shape as `GET /pastry-cart`) plus counters the client can
+   * use to confirm the sync result to the customer.
+   */
+  @Post("items/bulk")
+  @HttpCode(200)
+  async bulk(
+    @Body() dto: BulkAddDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.cart.bulkAdd(user.id, dto.items ?? []);
   }
 
   @Patch("items/:cartItemId")

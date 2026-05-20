@@ -175,6 +175,63 @@ With love,
 Authentically African flavours.`,
 });
 
+/**
+ * Expiring soon — sent by the credit-maintenance cron when a member
+ * has ACCRUAL rows whose `expiresAt` lands inside the heads-up window
+ * (default 7 days). The copy is deliberately direct about the
+ * amount + deadline so the customer can make an informed decision —
+ * vague "use your credits!" copy doesn't change behaviour, whereas
+ * "£18.50 expires on 12 Apr" does. The deadline is rendered in
+ * London time so the customer reads the date they're actually
+ * standing in, not UTC.
+ */
+export const indulgenceCreditsExpiringTemplate = ({
+  firstName,
+  expiringAmountMinor,
+  expiresAt,
+  accountUrl,
+}: {
+  firstName: string;
+  expiringAmountMinor: number;
+  expiresAt: Date;
+  accountUrl: string;
+}) => {
+  const deadline = new Intl.DateTimeFormat("en-GB", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    timeZone: "Europe/London",
+  }).format(expiresAt);
+  const amount = fmtGBP(expiringAmountMinor);
+  return {
+    subject: `Your Indulgence Credits — ${amount} expires ${deadline}`,
+    html: `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head>
+<body><div class="card">
+  <p class="brand">Time to indulge</p>
+  <h1>Hi ${escape(firstName)},</h1>
+  <p>Just a heads-up — <strong>${escape(amount)}</strong> of your Indulgence Credits expires on <strong>${escape(deadline)}</strong>.</p>
+  <p>Each month's credits stay valid for three months from the day they're issued; this batch is on its last week.</p>
+  <p>Pick something fresh from the menu while there's still time — we'd hate for you to miss out.</p>
+  <p><a class="btn" href="${escape(accountUrl)}">Place your order</a></p>
+  <p class="muted">Minimum pastry order £25. Credits already used aren't affected.</p>
+  <p class="signoff">— Nimi Events</p>
+</div></body></html>`,
+    text: `Hi ${firstName},
+
+Just a heads-up — ${amount} of your Indulgence Credits expires on ${deadline}.
+
+Each month's credits stay valid for three months from the day they're issued; this batch is on its last week.
+
+Pick something fresh from the menu while there's still time — we'd hate for you to miss out.
+
+Place your order: ${accountUrl}
+
+Minimum pastry order £25. Credits already used aren't affected.
+
+— Nimi Events`,
+  };
+};
+
 /** Reminder — sent by daily cron when a member has unused credits for 14+ days. */
 export const indulgenceCreditsReminderTemplate = ({
   firstName,

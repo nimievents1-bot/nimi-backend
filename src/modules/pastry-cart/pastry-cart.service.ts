@@ -174,6 +174,89 @@ export class PastryCartService {
     return this.view(userId);
   }
 
+  /**
+   * Bulk-add the contents of a localStorage-backed guest cart onto
+   * the authenticated user's server cart. Called from the cart page
+   * right after sign-in/sign-up, so the customer doesn't lose the
+   * items they picked anonymously.
+   *
+   * Semantics:
+   *   - Each presented line is added with `quantity` clamped to [1, 99].
+   *     A line with an unknown or unavailable `pastryItemId` is silently
+   *     skipped (we'd rather drop a stale item than 400 the whole sync).
+   *   - When a line already exists on the server cart, the presented
+   *     quantity is ADDED to the existing quantity — matching how
+   *     `addItem` behaves and what most customers expect from "merge
+   *     my anonymous cart into my account".
+   *   - Idempotent on a per-line basis: re-running the sync with the
+   *     same input doubles up the quantities (because we genuinely
+   *     don't know whether the caller is retrying or topping up).
+   *     Clients should clear localStorage after a successful sync to
+   *     prevent re-syncing on the next visit.
+   *
+   * Returns the merged cart view so the page can render the result
+   * without a second round-trip.
+   */
+  async bulkAdd(
+    userId: string,
+    lines: Array<{ pastryItemId: string; quantity: number }>,
+  ): Promise<{ view: CartView; addedCount: number; skippedCount: number }> {
+    if (!Array.isArray(lines) || lines.length === 0) {
+      return { view: await this.view(userId), addedCount: 0, skippedCount: 0 };
+    }
+
+    // De-dupe by pastryItemId before hitting the DB — a malformed
+    // payload with two lines for the same item is summed locally so
+    // we issue a single upsert per item rather than racing them.
+    const normalised = new Map<string, number>();
+    for (const line of lines) {
+      if (!line || typeof line.pastryItemId !== "string") continue;
+      const qty = Math.max(0, Math.min(99, Math.floor(Number(line.quantity) || 0)));
+      if (qty === 0) continue;
+      normalised.set(
+        line.pastryItemId,
+        (normalised.get(line.pastryItemId) ?? 0) + qty,
+      );
+    }
+    if (normalised.size === 0) {
+      return { view: await this.view(userId), addedCount: 0, skippedCount: 0 };
+    }
+
+    const ids = Array.from(normalised.keys());
+    const items = await this.db.pastryItem.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, available: true },
+    });
+    const availableIds = new Set(items.filter((i) => i.available).map((i) => i.id));
+
+    const cart = await this.getOrCreateCart(userId);
+
+    let addedCount = 0;
+    let skippedCount = 0;
+    for (const [pastryItemId, quantity] of normalised) {
+      if (!availableIds.has(pastryItemId)) {
+        // Stale / removed / hidden — drop the line. The client will
+        // see this absence when the response view comes back.
+        skippedCount += 1;
+        continue;
+      }
+      await this.db.pastryCartItem.upsert({
+        where: {
+          cartId_pastryItemId: { cartId: cart.id, pastryItemId },
+        },
+        create: { cartId: cart.id, pastryItemId, quantity },
+        update: { quantity: { increment: quantity } },
+      });
+      addedCount += 1;
+    }
+
+    return {
+      view: await this.view(userId),
+      addedCount,
+      skippedCount,
+    };
+  }
+
   async updateItem(
     userId: string,
     cartItemId: string,
