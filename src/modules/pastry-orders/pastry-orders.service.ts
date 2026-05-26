@@ -102,6 +102,39 @@ export class PastryOrdersService {
       );
     }
 
+    // ---- Per-item minimum order quantity ----
+    // The cart's `view()` already reports `meetsMinimum` per line, and
+    // the cart UI refuses to enable the checkout button until every
+    // line clears it. We re-check server-side because a determined
+    // client could still POST to this endpoint directly.
+    const belowMinimum = view.lines.filter((l) => !l.meetsMinimum);
+    if (belowMinimum.length > 0) {
+      const offender = belowMinimum[0];
+      throw new BadRequestException(
+        belowMinimum.length === 1
+          ? `${offender.name} needs at least ${offender.minQuantity} per order — you have ${offender.quantity}.`
+          : `Several items are below their minimum order quantity. Please adjust the cart and try again.`,
+      );
+    }
+
+    // ---- Daily kitchen batch cap ----
+    // Same shape — the cart `view()` reports `withinBatch` per line so
+    // the UI can disable the button, and we re-verify here so a
+    // direct API call can't slip through. By the time a customer
+    // reaches this endpoint, someone else may have filled the last
+    // remaining capacity since they put items in the cart — the
+    // checkout safety net catches that race and asks them to retry.
+    const overBatch = view.lines.filter((l) => !l.withinBatch);
+    if (overBatch.length > 0) {
+      const offender = overBatch[0];
+      const left = Math.max(0, (offender.batchLimit ?? 0) - offender.bookedToday);
+      throw new BadRequestException(
+        left === 0
+          ? `${offender.name} is fully booked for today. Remove it or come back tomorrow.`
+          : `${offender.name} now has only ${left} left for today — please drop your quantity to ${left} or fewer.`,
+      );
+    }
+
     const subtotalMinor = view.subtotalMinor;
     // ---- Promo code resolution (read-only, no mutation here) ----
     // We compute the discount up-front so credits + Stripe coupon can

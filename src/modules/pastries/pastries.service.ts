@@ -57,6 +57,10 @@ interface PublicPastry {
   imageAlt: string | null;
   tags: string[];
   leadTimeDays: number;
+  /** Per-item minimum order quantity (1 = no minimum). */
+  minQuantity: number;
+  /** Daily kitchen cap (null = no cap). Display-only on the public menu. */
+  batchLimit: number | null;
 }
 
 /**
@@ -145,6 +149,12 @@ export class PastriesService implements OnModuleInit {
           imageAlt: true,
           tags: true,
           leadTimeDays: true,
+          // Per-item rules surfaced to the public menu so the cravings
+          // page can render hints ("Minimum 6 per order") before the
+          // customer adds to cart. Enforcement still happens server-side
+          // in the cart and checkout — these are display-only here.
+          minQuantity: true,
+          batchLimit: true,
         },
       }),
       this.db.pastryItem.count({ where }),
@@ -175,6 +185,8 @@ export class PastriesService implements OnModuleInit {
         imageAlt: true,
         tags: true,
         leadTimeDays: true,
+        minQuantity: true,
+        batchLimit: true,
         available: true,
       },
     });
@@ -240,6 +252,11 @@ export class PastriesService implements OnModuleInit {
           imageAlt: dto.imageAlt ?? null,
           tags: (dto.tags ?? []) as Prisma.InputJsonValue,
           batchLimit: dto.batchLimit ?? null,
+          // `?? 1` mirrors the schema default — a missing/zero value
+          // means "no minimum", and accepting it here keeps the admin
+          // form simple (leaving the field blank works as expected
+          // without forcing the operator to type "1" everywhere).
+          minQuantity: dto.minQuantity && dto.minQuantity > 0 ? dto.minQuantity : 1,
           leadTimeDays: dto.leadTimeDays ?? 0,
           displayOrder: dto.displayOrder ?? 0,
           available: dto.available ?? false,
@@ -273,6 +290,12 @@ export class PastriesService implements OnModuleInit {
     if (dto.imageAlt !== undefined) data.imageAlt = dto.imageAlt;
     if (dto.tags !== undefined) data.tags = dto.tags as Prisma.InputJsonValue;
     if (dto.batchLimit !== undefined) data.batchLimit = dto.batchLimit;
+    // Same blank-or-zero handling as on create. The DTO already
+    // enforces Min(1)/Max(999) at validation time, so we just need
+    // to coerce a missing value to "no minimum" rather than nullify.
+    if (dto.minQuantity !== undefined) {
+      data.minQuantity = dto.minQuantity && dto.minQuantity > 0 ? dto.minQuantity : 1;
+    }
     if (dto.leadTimeDays !== undefined) data.leadTimeDays = dto.leadTimeDays;
     if (dto.displayOrder !== undefined) data.displayOrder = dto.displayOrder;
     if (dto.available !== undefined) data.available = dto.available;

@@ -746,7 +746,25 @@ model PastryItem {
   tags         Json    @default("[]")
 
   /// Daily/per-batch unit cap. NULL = no cap.
+  ///
+  /// Semantic: "max units of this item we can take in a single
+  /// calendar day (Europe/London)". The cart and checkout sum the
+  /// quantity of any open order (PENDING_PAYMENT through SHIPPED)
+  /// for this item whose `createdAt` falls within the same London
+  /// calendar day as the new order, plus the would-be new line, and
+  /// reject if the total exceeds this cap. Because every order of
+  /// the same item shares the same `leadTimeDays`, "same calendar
+  /// day" and "same fulfilment day" produce the same partition.
   batchLimit   Int?
+  /// Minimum units a single customer must order in one go. NULL or 1
+  /// = no minimum. Persisted as `Int` (not nullable) with a default
+  /// so historical rows naturally get the "no minimum" behaviour.
+  ///
+  /// Enforced at the cart (rejects quantity changes below this floor
+  /// — the cart view reports `meetsMinimum` per line so the UI can
+  /// disable the checkout button) and again server-side at the
+  /// `startCheckout` entry point as defence in depth.
+  minQuantity  Int     @default(1)
   /// Days from order to ready (0 = same day, 1 = next day, etc).
   leadTimeDays Int     @default(0)
 

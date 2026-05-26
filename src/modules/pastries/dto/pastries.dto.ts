@@ -65,6 +65,15 @@ export class CreatePastryDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10_000)
   batchLimit?: number;
 
+  /**
+   * Minimum units a customer must order in one go. Bounded to keep
+   * the admin form sane — a four-figure minimum is almost certainly
+   * a typo, and anything below 1 doesn't make sense. The cart and
+   * checkout both enforce this on quantity changes.
+   */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(999)
+  minQuantity?: number;
+
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(60)
   leadTimeDays?: number;
 
@@ -102,6 +111,15 @@ export class UpdatePastryDto {
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10_000)
   batchLimit?: number;
+
+  /**
+   * Minimum units a customer must order in one go. Bounded to keep
+   * the admin form sane — a four-figure minimum is almost certainly
+   * a typo, and anything below 1 doesn't make sense. The cart and
+   * checkout both enforce this on quantity changes.
+   */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(999)
+  minQuantity?: number;
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(60)
   leadTimeDays?: number;
