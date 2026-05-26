@@ -313,7 +313,13 @@ export class GiftingService implements OnModuleInit {
           },
         },
       ],
-      success_url: `${origin}/gifting/checkout/success?ref=${order.reference}`,
+      // `{CHECKOUT_SESSION_ID}` is a Stripe-recognised placeholder — Stripe
+      // substitutes the real session id when redirecting the customer back.
+      // The success page uses it to fire `/gifting/orders/by-reference/:ref/
+      // reconcile` as a webhook safety net (so the order still transitions
+      // to AWAITING_DESIGN_APPROVAL and the emails fire even when the
+      // Stripe → API webhook is slow, misrouted, or temporarily broken).
+      success_url: `${origin}/gifting/checkout/success?ref=${order.reference}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/gifting/checkout/cancel?ref=${order.reference}`,
       metadata: {
         orderId: order.id,
@@ -423,6 +429,93 @@ export class GiftingService implements OnModuleInit {
         data: { status: GiftOrderStatus.CANCELLED },
       });
     }
+  }
+
+  /**
+   * Re-verify a `PENDING_PAYMENT` gift order against Stripe and force-
+   * complete it if Stripe confirms the session is paid. Used by the
+   * `/gifting/checkout/success` page as a webhook safety net — if the
+   * customer paid but our DB still shows PENDING_PAYMENT (because the
+   * webhook is slow, misconfigured, or in flight), this endpoint asks
+   * Stripe directly and calls the existing idempotent paid handler.
+   *
+   * Mirrors `PastryOrdersService.reconcileFromSession`. Differences:
+   *   - Gift orders allow guest checkout (`userId` may be null), so we
+   *     authorise by matching the session id we stamped on the order at
+   *     checkout creation, NOT by JWT. Any caller who has the
+   *     post-redirect URL has the session id; nobody else does.
+   *   - Idempotent. Returns `reconciled: false` (with the current
+   *     status) when the order is already past PENDING_PAYMENT, when
+   *     Stripe reports the session not yet paid, or when the session
+   *     payload doesn't match. Never throws on a duplicate call.
+   *
+   * Security notes:
+   *   - The order reference is non-secret (it's in the URL after Stripe
+   *     redirects). The session id is short-lived and unique per
+   *     checkout, so requiring both narrows the attack surface.
+   *   - Mismatched session id → 400 with a generic message + warn log.
+   *     Mismatched reference → 404 (same shape as a typo).
+   */
+  async reconcileFromSession(
+    reference: string,
+    sessionId: string | undefined,
+  ): Promise<{ status: GiftOrderStatus; reconciled: boolean }> {
+    if (!sessionId || !sessionId.startsWith("cs_")) {
+      throw new BadRequestException("Missing Stripe session id.");
+    }
+    const order = await this.db.giftOrder.findUnique({
+      where: { reference },
+      select: { id: true, status: true, stripeSessionId: true },
+    });
+    if (!order) throw new NotFoundException();
+
+    // Already moved past PENDING_PAYMENT — nothing to do.
+    if (order.status !== GiftOrderStatus.PENDING_PAYMENT) {
+      return { status: order.status, reconciled: false };
+    }
+
+    // Authorisation: only trust a session id that matches the one we
+    // stamped onto the order at checkout creation. Without this, anyone
+    // guessing a reference + any session id could nudge another order.
+    if (order.stripeSessionId && order.stripeSessionId !== sessionId) {
+      this.logger.warn(
+        { reference, expected: order.stripeSessionId, presented: sessionId },
+        "Gift reconcile attempt with mismatched session id",
+      );
+      throw new BadRequestException("Session id does not match this order.");
+    }
+
+    if (!this.stripe.isAvailable()) {
+      throw new ServiceUnavailableException("Payments are not available right now.");
+    }
+
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await this.stripe.sdk.checkout.sessions.retrieve(sessionId);
+    } catch (err) {
+      this.logger.error({ err, sessionId, reference }, "Stripe session.retrieve failed");
+      throw new ServiceUnavailableException(
+        "We couldn't verify your payment with our provider. Please try again in a moment.",
+      );
+    }
+
+    // Stripe authoritative state. We require `payment_status === "paid"` —
+    // `complete` alone isn't enough since complete + unpaid means the
+    // session expired before the customer finished checkout. For async
+    // payment methods that confirm later (bank debits etc.) we leave the
+    // order in PENDING_PAYMENT and let the async_payment_succeeded
+    // webhook (or the next page refresh) advance it.
+    if (session.payment_status !== "paid") {
+      return { status: order.status, reconciled: false };
+    }
+
+    // Reuse the canonical paid handler. It's idempotent — if the webhook
+    // lands in parallel it'll early-return on the PENDING_PAYMENT check
+    // at the top, so a race between webhook + reconcile cannot
+    // double-dispatch emails or notifications.
+    await this.onCheckoutSessionCompleted(session);
+
+    return { status: GiftOrderStatus.AWAITING_DESIGN_APPROVAL, reconciled: true };
   }
 
   async onChargeRefunded(charge: Stripe.Charge): Promise<void> {
