@@ -103,8 +103,8 @@ const EnvSchema = z.object({
   TURNSTILE_SECRET_KEY: z.string().optional(),
   SENTRY_DSN: z.string().optional(),
 
-  SUPPORT_INBOX: z.string().email().default("hello@nimievents.co.uk"),
-  NOREPLY_INBOX: z.string().email().default("noreply@nimievents.co.uk"),
+  SUPPORT_INBOX: z.string().email().default("nimi.events1@gmail.com"),
+  NOREPLY_INBOX: z.string().email().default("noreply@nimievents.com"),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

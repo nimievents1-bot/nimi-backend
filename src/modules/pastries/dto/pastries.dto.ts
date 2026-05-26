@@ -62,8 +62,26 @@ export class CreatePastryDto {
   @IsOptional() @IsArray() @ArrayMaxSize(20)
   tags?: string[];
 
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10_000)
-  batchLimit?: number;
+  /**
+   * Daily kitchen cap. `null` = no cap (clears any previously-set
+   * value); a positive integer is the cap.
+   *
+   * Why no `@Type(() => Number)`:
+   *   The body is JSON, so the value arrives as the right type
+   *   already (number or null). `@Type(() => Number)` would coerce
+   *   `null` to `0` via `Number(null)`, after which `@Min(1)` would
+   *   reject it — and the admin form would silently fail to clear
+   *   the cap. Skipping the transform lets `null` pass through to
+   *   `@IsOptional()`, which short-circuits validation when the
+   *   value is `null` or `undefined`.
+   *
+   * Semantics for the service:
+   *   - `undefined` → operator didn't touch this field; leave the DB row alone.
+   *   - `null`      → operator cleared the field; set the column to NULL.
+   *   - integer ≥ 1 → operator set a new cap.
+   */
+  @IsOptional() @IsInt() @Min(1) @Max(10_000)
+  batchLimit?: number | null;
 
   /**
    * Minimum units a customer must order in one go. Bounded to keep
@@ -109,8 +127,26 @@ export class UpdatePastryDto {
   @IsOptional() @IsArray() @ArrayMaxSize(20)
   tags?: string[];
 
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10_000)
-  batchLimit?: number;
+  /**
+   * Daily kitchen cap. `null` = no cap (clears any previously-set
+   * value); a positive integer is the cap.
+   *
+   * Why no `@Type(() => Number)`:
+   *   The body is JSON, so the value arrives as the right type
+   *   already (number or null). `@Type(() => Number)` would coerce
+   *   `null` to `0` via `Number(null)`, after which `@Min(1)` would
+   *   reject it — and the admin form would silently fail to clear
+   *   the cap. Skipping the transform lets `null` pass through to
+   *   `@IsOptional()`, which short-circuits validation when the
+   *   value is `null` or `undefined`.
+   *
+   * Semantics for the service:
+   *   - `undefined` → operator didn't touch this field; leave the DB row alone.
+   *   - `null`      → operator cleared the field; set the column to NULL.
+   *   - integer ≥ 1 → operator set a new cap.
+   */
+  @IsOptional() @IsInt() @Min(1) @Max(10_000)
+  batchLimit?: number | null;
 
   /**
    * Minimum units a customer must order in one go. Bounded to keep

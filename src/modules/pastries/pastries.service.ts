@@ -251,6 +251,12 @@ export class PastriesService implements OnModuleInit {
           imageUrl: dto.imageUrl ?? null,
           imageAlt: dto.imageAlt ?? null,
           tags: (dto.tags ?? []) as Prisma.InputJsonValue,
+          // `??` already maps both `undefined` (field missing) AND
+          // `null` (operator submitted blank) to `null`, which is
+          // the "no cap" sentinel — so this branch needs no change
+          // for the tri-state fix; recording the equivalence here so
+          // future readers don't try to "harden" it the way the
+          // update path needed.
           batchLimit: dto.batchLimit ?? null,
           // `?? 1` mirrors the schema default — a missing/zero value
           // means "no minimum", and accepting it here keeps the admin
@@ -289,7 +295,18 @@ export class PastriesService implements OnModuleInit {
     if (dto.imageUrl !== undefined) data.imageUrl = dto.imageUrl;
     if (dto.imageAlt !== undefined) data.imageAlt = dto.imageAlt;
     if (dto.tags !== undefined) data.tags = dto.tags as Prisma.InputJsonValue;
-    if (dto.batchLimit !== undefined) data.batchLimit = dto.batchLimit;
+    // Tri-state semantics:
+    //   - undefined → field absent from payload → leave untouched
+    //   - null      → operator explicitly cleared the input → wipe the cap
+    //   - integer   → operator set a new cap
+    // Without the explicit `null` branch the previous code couldn't
+    // distinguish "blank" from "missing" — every blank submission
+    // looked like "don't change" and the prior cap stayed in place,
+    // which was the regression operators kept hitting on the admin
+    // editor.
+    if (dto.batchLimit !== undefined) {
+      data.batchLimit = dto.batchLimit === null ? null : dto.batchLimit;
+    }
     // Same blank-or-zero handling as on create. The DTO already
     // enforces Min(1)/Max(999) at validation time, so we just need
     // to coerce a missing value to "no minimum" rather than nullify.

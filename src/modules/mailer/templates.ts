@@ -155,13 +155,13 @@ export const contactAckTemplate = ({ name, kind }: ContactAckProps) => {
   <h1>Thank you, ${escape(name)}.</h1>
   <p>We've received your enquiry and will reply within one working day.</p>
   <p>If your message is time-sensitive, you can also reach us at
-     <a href="mailto:hello@nimievents.co.uk">hello@nimievents.co.uk</a>.</p>
+     <a href="mailto:nimi.events1@gmail.com">nimi.events1@gmail.com</a>.</p>
   <hr>
   <p class="muted">— The Nimi Events team</p>
 </div></body></html>`,
     text: `Thank you, ${name}.
 
-We've received your enquiry and will reply within one working day. If your message is time-sensitive, reach us at hello@nimievents.co.uk.
+We've received your enquiry and will reply within one working day. If your message is time-sensitive, reach us at nimi.events1@gmail.com.
 
 — The Nimi Events team`,
   };
