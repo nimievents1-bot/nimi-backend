@@ -76,6 +76,15 @@ model User {
   pastryOrders           PastryOrder[]
   notifications          Notification[]
   promoCodes             PromoCode[]
+  // Gift orders placed by this user. Nullable on GiftOrder so guest
+  // checkouts (no signed-in user) are also supported — that branch
+  // simply doesn't populate this side of the relation.
+  giftOrders             GiftOrder[]
+  // Indulgence Club ledger entries (accruals, redemptions, expiries,
+  // adjustments). Cascade on user hard-delete keeps ledger integrity
+  // tied to the owning user; soft-delete (`deletedAt`) never triggers
+  // cascades because the row still exists.
+  creditTransactions     CreditTransaction[]
 
   @@index([role])
   @@index([deletedAt])
@@ -428,6 +437,13 @@ model GiftOrder {
 
   items GiftOrderItem[]
 
+  // Optional relation back to the user who placed the order. Guest
+  // checkouts leave `userId` null (and therefore `user` null too).
+  // `SetNull` on user hard-delete preserves the order row — orders
+  // are revenue records and shouldn't disappear with the customer's
+  // account.
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
   @@index([userId, createdAt])
   @@index([status, createdAt])
   @@index([email])
@@ -627,6 +643,13 @@ model CreditTransaction {
   expiresAt DateTime?
 
   createdAt DateTime @default(now())
+
+  // Relation back to the owning user. Cascade on user hard-delete
+  // keeps the ledger consistent — a user that genuinely no longer
+  // exists shouldn't leave dangling credit rows. Soft-deleted users
+  // (with `deletedAt` set) keep their ledger because the User row
+  // is still present.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, sourceType, sourceId])
   @@index([userId, createdAt])
