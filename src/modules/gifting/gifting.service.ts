@@ -223,6 +223,217 @@ export class GiftingService implements OnModuleInit {
     return row;
   }
 
+  // ---------- admin catalog ----------
+
+  /**
+   * Admin-side list. Returns EVERY collection (published and
+   * unpublished) so the operator can manage drafts. Sorted by
+   * category then position then name — the order they'd most
+   * naturally read down a printed sheet of the catalog.
+   *
+   * Bounded `limit` keeps a runaway client request from scanning the
+   * whole table; default 200 is comfortably larger than any realistic
+   * catalog at this stage of the business.
+   */
+  async adminListCollections(opts: {
+    limit?: number;
+    offset?: number;
+    published?: boolean;
+    category?: string;
+  }): Promise<{ rows: GiftCollection[]; total: number; limit: number; offset: number }> {
+    const limit = Math.min(opts.limit ?? 200, 200);
+    const offset = opts.offset ?? 0;
+
+    const where: Prisma.GiftCollectionWhereInput = {};
+    if (opts.published !== undefined) where.published = opts.published;
+    if (opts.category) {
+      where.category = opts.category as GiftCollection["category"];
+    }
+
+    const [rows, total] = await this.db.$transaction([
+      this.db.giftCollection.findMany({
+        where,
+        orderBy: [{ category: "asc" }, { position: "asc" }, { name: "asc" }],
+        take: limit,
+        skip: offset,
+      }),
+      this.db.giftCollection.count({ where }),
+    ]);
+
+    return { rows, total, limit, offset };
+  }
+
+  /**
+   * Fetch one collection by primary key for the admin editor. Returns
+   * 404 if the row doesn't exist — admin can't edit a draft they
+   * accidentally already deleted in another tab.
+   */
+  async adminGetCollection(id: string): Promise<GiftCollection> {
+    const row = await this.db.giftCollection.findUnique({ where: { id } });
+    if (!row) throw new NotFoundException();
+    return row;
+  }
+
+  /**
+   * Create a new collection. The `slug` is the unique handle exposed
+   * on `/gifting/<slug>` — `mapPrismaError` translates the P2002
+   * unique-constraint violation into a friendlier 409 if the operator
+   * tries to reuse one.
+   */
+  async createCollection(
+    dto: {
+      slug: string;
+      category: "CORPORATE" | "WEDDINGS" | "PRIVATE";
+      name: string;
+      description: string;
+      items: string[];
+      unitPriceMinor: number;
+      priceMaxMinor?: number | null;
+      currency?: string;
+      moq?: number;
+      leadTimeDays?: number;
+      imageUrl?: string | null;
+      published?: boolean;
+      position?: number;
+    },
+  ): Promise<GiftCollection> {
+    try {
+      return await this.db.giftCollection.create({
+        data: {
+          slug: dto.slug,
+          category: dto.category,
+          name: dto.name,
+          description: dto.description,
+          items: dto.items as Prisma.InputJsonValue,
+          unitPriceMinor: dto.unitPriceMinor,
+          // `?? null` collapses both `undefined` (operator omitted)
+          // and explicit `null` (operator cleared) to NULL — both
+          // mean "no max price" so they're operationally identical.
+          priceMaxMinor: dto.priceMaxMinor ?? null,
+          currency: dto.currency ?? "gbp",
+          moq: dto.moq ?? 1,
+          leadTimeDays: dto.leadTimeDays ?? 56,
+          imageUrl: dto.imageUrl ?? null,
+          published: dto.published ?? false,
+          position: dto.position ?? 0,
+        },
+      });
+    } catch (err) {
+      throw this.mapPrismaError(err, "Couldn't create gift collection.");
+    }
+  }
+
+  /**
+   * Update an existing collection. Tri-state semantics on the
+   * nullable fields:
+   *   - field absent from DTO → leave row untouched
+   *   - field === null        → set to NULL on the row (clears any
+   *                              previously set value)
+   *   - field === value       → set to the new value
+   * Matches the same pattern used by the pastry editor so admin
+   * forms can keep behaving consistently.
+   */
+  async updateCollection(
+    id: string,
+    dto: {
+      slug?: string;
+      category?: "CORPORATE" | "WEDDINGS" | "PRIVATE";
+      name?: string;
+      description?: string;
+      items?: string[];
+      unitPriceMinor?: number;
+      priceMaxMinor?: number | null;
+      currency?: string;
+      moq?: number;
+      leadTimeDays?: number;
+      imageUrl?: string | null;
+      published?: boolean;
+      position?: number;
+    },
+  ): Promise<GiftCollection> {
+    // Defensive: prove the row exists so a 404 stays a 404 even
+    // when the DTO would otherwise pass validation with no fields.
+    const before = await this.db.giftCollection.findUnique({ where: { id } });
+    if (!before) throw new NotFoundException();
+
+    const data: Prisma.GiftCollectionUpdateInput = {};
+    if (dto.slug !== undefined) data.slug = dto.slug;
+    if (dto.category !== undefined) data.category = dto.category;
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.description !== undefined) data.description = dto.description;
+    if (dto.items !== undefined) data.items = dto.items as Prisma.InputJsonValue;
+    if (dto.unitPriceMinor !== undefined) data.unitPriceMinor = dto.unitPriceMinor;
+    if (dto.priceMaxMinor !== undefined) {
+      data.priceMaxMinor = dto.priceMaxMinor === null ? null : dto.priceMaxMinor;
+    }
+    if (dto.currency !== undefined) data.currency = dto.currency;
+    if (dto.moq !== undefined) data.moq = dto.moq;
+    if (dto.leadTimeDays !== undefined) data.leadTimeDays = dto.leadTimeDays;
+    if (dto.imageUrl !== undefined) {
+      data.imageUrl = dto.imageUrl === null ? null : dto.imageUrl;
+    }
+    if (dto.published !== undefined) data.published = dto.published;
+    if (dto.position !== undefined) data.position = dto.position;
+
+    try {
+      return await this.db.giftCollection.update({ where: { id }, data });
+    } catch (err) {
+      throw this.mapPrismaError(err, "Couldn't update gift collection.");
+    }
+  }
+
+  /**
+   * Delete a collection.
+   *
+   * `GiftOrderItem.collectionId` references this row, so a hard
+   * delete would cascade or fail depending on the FK rule. Prisma's
+   * default `Restrict` (set up in schema.prisma) means an attempt to
+   * delete a collection with historical orders will throw — that's
+   * exactly what we want. We catch the foreign-key error and surface
+   * a friendly message so the admin understands they need to either
+   * (a) refund/cancel the orders that reference it, or (b) just
+   * unpublish the collection (`published = false`) which hides it
+   * from the public site while preserving the audit trail.
+   */
+  async deleteCollection(id: string): Promise<{ ok: true }> {
+    const before = await this.db.giftCollection.findUnique({ where: { id } });
+    if (!before) throw new NotFoundException();
+
+    try {
+      await this.db.giftCollection.delete({ where: { id } });
+      return { ok: true };
+    } catch (err) {
+      // P2003 = foreign key constraint failed. Translate.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
+        throw new BadRequestException(
+          "This collection has historical orders attached. Unpublish it instead — that removes it from the public site while keeping past orders intact.",
+        );
+      }
+      throw this.mapPrismaError(err, "Couldn't delete gift collection.");
+    }
+  }
+
+  /**
+   * Map common Prisma errors into user-friendly HTTP responses.
+   * Kept local to this method group because the failure modes for
+   * collections (unique-slug clash, FK to orders) are specific to
+   * this surface.
+   */
+  private mapPrismaError(err: unknown, fallback: string): Error {
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      if (err.code === "P2002") {
+        return new BadRequestException(
+          "That slug is already in use. Pick a different one.",
+        );
+      }
+      if (err.code === "P2025") {
+        return new NotFoundException();
+      }
+    }
+    this.logger.error({ err }, fallback);
+    return new BadRequestException(fallback);
+  }
+
   // ---------- checkout ----------
 
   async createCheckoutSession(
