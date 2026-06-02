@@ -237,6 +237,69 @@ model SiteImage {
 }
 
 ///
+/// ServiceTier — admin-editable tier cards on `/catering` and `/events`.
+///
+/// Each marketing page shows three tier cards (buffet/family-style/
+/// plated on catering, coordination/design/production on events).
+/// These used to be hardcoded arrays in the page files; this model
+/// lets the operator add, edit, reorder, disable or remove tiers
+/// without a code deploy.
+///
+/// Fields:
+///   - `category`   groups tiers by which public page they appear on.
+///   - `slug`       is the URL identifier passed through to booking
+///                  forms (`?tier=buffet`), so it MUST be stable
+///                  across edits; the API rejects slug renames if
+///                  recent enquiries reference them. (TODO if
+///                  needed — for now we just enforce uniqueness
+///                  within a category.)
+///   - `flagship`   highlights the middle tier with a different
+///                  border treatment ("most popular").
+///   - `bullets`    is a JSON array of strings — what the tier
+///                  includes. The admin form takes it as a textarea,
+///                  one line per bullet.
+///   - `imageUrl`   the tier card hero image. Overrides the
+///                  registry-based site-image fallback at
+///                  `catering.<slug>` / `events.<slug>`.
+///   - `position`   controls render order within the category;
+///                  lower is earlier.
+///   - `active`     true = visible on the public page. False is a
+///                  soft-delete that preserves slug history (so a
+///                  booking link from a printed flyer still works).
+///
+model ServiceTier {
+  id          String   @id @default(uuid())
+
+  /// "CATERING" or "EVENTS". Plain string (not Prisma enum) so we
+  /// don't need a migration to add more categories later.
+  category    String
+
+  /// URL handle within the category. Lowercase, hyphenated.
+  slug        String
+
+  eyebrow     String
+  title       String
+  description String
+
+  /// JSON array of bullet strings. See the doc comment on the
+  /// `PastryItem.tags` field for the same pattern.
+  bullets     Json     @default("[]")
+
+  imageUrl    String?
+
+  flagship    Boolean  @default(false)
+  position    Int      @default(0)
+  active      Boolean  @default(true)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+
+  @@unique([category, slug])
+  @@index([category, active, position])
+}
+
+///
 /// ShippingZone — admin-editable delivery fee zones.
 ///
 /// Each row defines a delivery region by postcode prefixes, the
