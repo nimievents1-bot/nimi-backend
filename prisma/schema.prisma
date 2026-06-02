@@ -188,6 +188,54 @@ model ContentBlock {
   @@index([page, key, locale, publishedAt])
 }
 
+///
+/// SiteImage — admin-editable overrides for marketing-site imagery.
+///
+/// Each marketing-page image slot the operator can edit has a stable
+/// string key (e.g. `"hero.home"`, `"services.catering"`,
+/// `"gifting.signature"`). When a row exists for a given key, the
+/// public site renders the row's `url` instead of the hardcoded
+/// fallback from `nimi-web/src/lib/images.ts`. When no row exists for
+/// a key, the fallback wins. This means:
+///
+///   - Operators can replace any registered image without a code
+///     deploy.
+///   - The public site is never broken: every key has a code-level
+///     fallback, so a missing or deleted row degrades gracefully to
+///     the original asset.
+///   - Adding a new editable slot is two edits: register the key in
+///     `lib/siteImages.ts` (web) and reference it from the page. No
+///     migration is needed per-image.
+///
+/// We deliberately use the key as the primary identifier (no
+/// surrogate UUID) — keys are operator-facing, stable across
+/// upserts, and we never need to rename them after the fact. The
+/// admin upserts on key, the public site reads by key.
+///
+/// `updatedBy` and `updatedAt` give us audit trail for the admin
+/// list view ("who changed this and when").
+///
+model SiteImage {
+  /// e.g. "hero.home", "services.catering", "gifting.essential".
+  /// Lowercase, dot-segmented. Format is a soft convention; the
+  /// only requirement at the DB level is uniqueness.
+  key       String   @id
+
+  /// Public URL of the override image. Typically an R2 URL produced
+  /// by the existing `/api/upload/image` pipeline, but any
+  /// absolute https URL works.
+  url       String
+
+  /// Optional alt text for accessibility. Falls back to the code-
+  /// level alt for the slot when null.
+  alt       String?
+
+  /// Audit trail.
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
 model Faq {
   id        String  @id @default(uuid())
   category  String
