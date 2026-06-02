@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  type OnModuleInit,
 } from "@nestjs/common";
 import { Prisma, type ServiceTier } from "@prisma/client";
 
@@ -19,6 +20,121 @@ interface RequestMeta {
 }
 
 /**
+ * Seed used on first boot — exactly mirrors the hardcoded tiers that
+ * previously lived in `nimi-web/src/app/(marketing)/{catering,events}/page.tsx`.
+ * Lets the operator open `/admin/tiers` on day one and find the
+ * existing six tiers ready to edit, rather than an empty table they
+ * have to retype from memory. We deliberately don't track which
+ * rows are "seeded" vs "operator-added" — once they're in the DB
+ * they're all equal first-class records.
+ */
+const SEED_TIERS: ReadonlyArray<{
+  category: "CATERING" | "EVENTS";
+  slug: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+  bullets: readonly string[];
+  flagship?: boolean;
+  position: number;
+}> = [
+  // -------- Catering --------
+  {
+    category: "CATERING",
+    slug: "buffet",
+    eyebrow: "Tier 1",
+    title: "Buffet Service",
+    description:
+      "Self-serve, relaxed — perfect for casual events and gatherings where guests serve themselves at their own pace.",
+    bullets: [
+      "Buffet-style catering with chafer-warmed mains",
+      "Relaxed, self-serve setup and presentation",
+      "Ideal for casual events and gatherings",
+    ],
+    position: 0,
+  },
+  {
+    category: "CATERING",
+    slug: "family-style",
+    eyebrow: "Tier 2",
+    title: "Family Style Service",
+    description:
+      "Shared platters served to each table for a warm, communal dining experience with elevated presentation.",
+    bullets: [
+      "Shared platters served to tables",
+      "Warm, communal dining experience",
+      "Slightly more elevated presentation than buffet",
+    ],
+    position: 10,
+  },
+  {
+    category: "CATERING",
+    slug: "plated",
+    eyebrow: "Tier 3",
+    title: "Plated Service",
+    description:
+      "Fully plated meals delivered to each guest — a formal dining experience with full service staff and considered presentation.",
+    bullets: [
+      "Fully plated meals to every guest",
+      "Formal dining experience",
+      "Full service staff and presentation",
+    ],
+    flagship: true,
+    position: 20,
+  },
+
+  // -------- Events --------
+  {
+    category: "EVENTS",
+    slug: "coordination",
+    eyebrow: "Tier 1",
+    title: "Event Coordination",
+    description:
+      "On-the-day coordination — we hold the timeline and the suppliers, and quietly solve the small things so you don't have to.",
+    bullets: [
+      "On-the-day coordination only",
+      "Timeline management",
+      "Supplier coordination",
+      "Problem solving during the event",
+    ],
+    position: 0,
+  },
+  {
+    category: "EVENTS",
+    slug: "design",
+    eyebrow: "Tier 2",
+    title: "Event Design & Coordination",
+    description:
+      "Everything in Tier 1, plus styling direction — florals, signage, layout, and lighting designed to your vision and made coherent.",
+    bullets: [
+      "Everything in Tier 1",
+      "Styling direction",
+      "Floral concepts",
+      "Signage and layout guidance",
+      "Lighting and aesthetic design input",
+    ],
+    position: 10,
+  },
+  {
+    category: "EVENTS",
+    slug: "production",
+    eyebrow: "Tier 3",
+    title: "Full Event Production",
+    description:
+      "End-to-end planning. From concept to last guest, we source, style, and run every moving part of the day.",
+    bullets: [
+      "Full end-to-end planning",
+      "Concept creation",
+      "Supplier sourcing and management",
+      "Styling + execution",
+      "Full day management",
+    ],
+    flagship: true,
+    position: 20,
+  },
+];
+
+/**
  * Admin CRUD plus public read for `ServiceTier`. Same shape as the
  * other admin-managed catalogue services (`GiftingService`,
  * `PastriesService`).
@@ -29,10 +145,52 @@ interface RequestMeta {
  * Next.js fetch cache on the web side.
  */
 @Injectable()
-export class ServiceTiersService {
+export class ServiceTiersService implements OnModuleInit {
   private readonly logger = new Logger(ServiceTiersService.name);
 
   constructor(private readonly db: PrismaService) {}
+
+  /**
+   * First-boot seed. Runs once at module init: if the table is
+   * empty, the hardcoded `SEED_TIERS` set is inserted so the admin
+   * lands on a populated `/admin/tiers` page instead of having to
+   * recreate the existing six tiers from memory. After the first
+   * boot the table is non-empty and this is a no-op.
+   *
+   * We seed only when zero rows exist — this is intentionally
+   * conservative. If the operator deletes every row themselves, the
+   * next deploy would re-seed; if that surprises them it's still a
+   * safe outcome (they can disable any unwanted tier with the
+   * Active toggle). Tracking "have we seeded before" via a marker
+   * row would be more correct but adds complexity for an unlikely
+   * edge case.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const count = await this.db.serviceTier.count();
+      if (count > 0) return;
+
+      this.logger.log(`Seeding ${SEED_TIERS.length} service tiers (first-time bootstrap)`);
+      await this.db.serviceTier.createMany({
+        data: SEED_TIERS.map((t) => ({
+          category: t.category,
+          slug: t.slug,
+          eyebrow: t.eyebrow,
+          title: t.title,
+          description: t.description,
+          bullets: t.bullets as unknown as Prisma.InputJsonValue,
+          flagship: t.flagship ?? false,
+          position: t.position,
+          active: true,
+          updatedBy: "system",
+        })),
+        skipDuplicates: true,
+      });
+    } catch (err) {
+      // Non-fatal — admin can add manually if seeding fails for any reason.
+      this.logger.error({ err }, "Service-tier seed failed");
+    }
+  }
 
   // ---------- public ----------
 
