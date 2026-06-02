@@ -1069,6 +1069,26 @@ model PastryOrder {
   shippingPostcode String
   shippingCountry  String  @default("GB")
 
+  /// Resolved shipping fee at order time, in minor units. Computed by
+  /// `ShippingService.resolveFee` from the customer's postcode and the
+  /// cart subtotal. Stored on the row so a refund / receipt rendered
+  /// months later reflects what the customer actually paid, even if
+  /// the operator has since changed the underlying zone rates.
+  shippingFeeMinor Int @default(0)
+
+  /// The `ShippingZone.id` that resolved at order time. Nullable
+  /// because (a) order rows existed before this feature shipped and
+  /// (b) the zone might be deleted later. We keep the id as a
+  /// soft-link for analytics ("which zone produces most orders"),
+  /// not for FK integrity.
+  shippingZoneId   String?
+
+  /// Snapshot of `ShippingZone.name` at order time. Persisted
+  /// alongside the id so the order detail page + receipt can render
+  /// the human label ("UK mainland") even if the zone has since
+  /// been renamed or removed.
+  shippingZoneName String?
+
   /// Customer-facing notes (allergies, instructions, gate codes etc.).
   notes         String?
   /// Admin-only notes — never surfaced in customer email.

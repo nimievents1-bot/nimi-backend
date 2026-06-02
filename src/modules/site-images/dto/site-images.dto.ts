@@ -1,16 +1,19 @@
 import { IsOptional, IsString, IsUrl, MaxLength } from "class-validator";
 
 /**
- * Key format: lowercase letters/numbers, optionally dot-segmented.
- * E.g. `hero.home`, `services.catering`, `gifting.essential`.
+ * Key format: letters (either case) and digits, optionally
+ * dot- or hyphen-segmented. E.g. `hero.home`, `services.catering`,
+ * `gifting.softLuxe`, `catering.family-style`.
  *
- * The dot segmentation is a soft convention that lets us group keys
- * in the admin UI (everything starting with `hero.` lives in the
- * "Heroes" section, etc.). The regex enforces shape, not membership
- * — adding a new group is a code change in the registry, not a
- * schema change.
+ * Why case-insensitive: the web registry mixes lowercase (most
+ * keys) with camelCase for legacy compatibility with the existing
+ * `images.ts` library (`gifting.softLuxe`, `catering.familyStyle`,
+ * etc.). Forcing strict lowercase would break those entries.
+ * The dot/hyphen segmentation is a soft convention that lets the
+ * admin UI group keys by their leading segment — it shapes
+ * presentation, not validation.
  */
-const KEY_REGEX = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const KEY_REGEX = /^[a-zA-Z0-9]+(?:[.-][a-zA-Z0-9]+)*$/;
 
 /**
  * Body for `PUT /v1/admin/site-images/:key`. Upsert semantics:

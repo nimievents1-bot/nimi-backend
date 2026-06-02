@@ -28,6 +28,7 @@ import {
 } from "../pastry-cart/pastry-cart.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { PromoCodesService } from "../promo-codes/promo-codes.service";
+import { ShippingService } from "../shipping/shipping.service";
 import { StripeService } from "../stripe/stripe.service";
 
 import { type StartPastryCheckoutDto } from "./dto/checkout.dto";
@@ -63,6 +64,7 @@ export class PastryOrdersService {
     private readonly mailer: MailerService,
     private readonly notifications: NotificationsService,
     private readonly promoCodes: PromoCodesService,
+    private readonly shipping: ShippingService,
   ) {}
 
   // ---------- checkout ----------
@@ -136,6 +138,28 @@ export class PastryOrdersService {
     }
 
     const subtotalMinor = view.subtotalMinor;
+
+    // ---- Shipping fee resolution ----
+    // Compute the delivery fee from the customer's postcode against
+    // the admin-configured zones. A null return from `resolveFee`
+    // means "no zone matched and there's no catch-all" — which on
+    // first deploy (before the admin has set up any zones) means
+    // "no shipping config yet"; we treat that as free shipping so
+    // existing checkout flows don't regress. Once at least one
+    // catch-all zone exists, the resolver always returns a match.
+    //
+    // Indulgence Credits are deliberately NOT applied to the
+    // shipping fee — credits are for pastries, the courier still
+    // needs paying. Promo codes also leave shipping alone for the
+    // same reason.
+    const shippingResult = await this.shipping.resolveFee(
+      dto.shippingPostcode,
+      subtotalMinor,
+    );
+    const shippingMinor = shippingResult?.feeMinor ?? 0;
+    const shippingZoneId = shippingResult?.zoneId ?? null;
+    const shippingZoneName = shippingResult?.zoneName ?? null;
+
     // ---- Promo code resolution (read-only, no mutation here) ----
     // We compute the discount up-front so credits + Stripe coupon can
     // both see the post-promo total. The atomic redemption happens
@@ -173,8 +197,15 @@ export class PastryOrdersService {
       imageUrl: line.imageUrl,
     }));
 
-    if (payable === 0) {
-      // Credits (and/or promo) cover the whole order — no Stripe needed.
+    // Grand total the customer must pay = items-portion-after-credits
+    // PLUS the shipping fee. We only skip Stripe when BOTH are zero
+    // (credits cover items AND shipping is free for this zone /
+    // basket size). When shipping is non-zero, even a 100%-credit-
+    // covered cart still needs Stripe to charge the courier fee.
+    const grandTotal = payable + shippingMinor;
+
+    if (grandTotal === 0) {
+      // Credits cover items, shipping is free — no Stripe needed.
       // Create order PAID, deduct credits, and atomically redeem the
       // promo code, all in one transaction so a half-applied state
       // can't survive a failure.
@@ -198,6 +229,12 @@ export class PastryOrdersService {
             shippingCity: dto.shippingCity,
             shippingPostcode: dto.shippingPostcode,
             shippingCountry: dto.shippingCountry ?? "GB",
+            // Shipping is 0 by definition on this branch, but we
+            // persist the resolved zone snapshot anyway so admin
+            // analytics can still attribute the order to a zone.
+            shippingFeeMinor: 0,
+            shippingZoneId,
+            shippingZoneName,
             notes: dto.notes ?? null,
             paidAt: new Date(),
             items: {
@@ -283,13 +320,20 @@ export class PastryOrdersService {
           creditAppliedMinor: creditApplied,
           promoDiscountMinor: promoDiscount,
           promoCodeId: promoPreview?.promo.id ?? null,
-          totalMinor: payable,
+          // Grand total Stripe will charge = items-after-credits + shipping.
+          totalMinor: grandTotal,
           currency: view.currency,
           shippingLine1: dto.shippingLine1,
           shippingLine2: dto.shippingLine2 ?? null,
           shippingCity: dto.shippingCity,
           shippingPostcode: dto.shippingPostcode,
           shippingCountry: dto.shippingCountry ?? "GB",
+          // Persist the resolved shipping snapshot. Future receipts
+          // / refunds reflect the price the customer paid even if
+          // the operator rerates the zone tomorrow.
+          shippingFeeMinor: shippingMinor,
+          shippingZoneId,
+          shippingZoneName,
           notes: dto.notes ?? null,
           items: {
             create: view.lines.map((line, idx) => ({
@@ -397,27 +441,53 @@ export class PastryOrdersService {
     // the URL guard so a single bad upload can't block the whole
     // checkout. The product still appears on Stripe's checkout — just
     // without the image thumbnail.
-    const lineItems = view.lines.map((line) => {
-      const validImage = line.imageUrl && isValidHttpUrl(line.imageUrl) ? line.imageUrl : null;
-      if (line.imageUrl && !validImage) {
-        this.logger.warn(
-          { pastryItemId: line.itemId, imageUrl: line.imageUrl },
-          "Dropping invalid imageUrl from Stripe Checkout line item",
-        );
-      }
-      return {
-        quantity: line.quantity,
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = view.lines.map(
+      (line) => {
+        const validImage = line.imageUrl && isValidHttpUrl(line.imageUrl) ? line.imageUrl : null;
+        if (line.imageUrl && !validImage) {
+          this.logger.warn(
+            { pastryItemId: line.itemId, imageUrl: line.imageUrl },
+            "Dropping invalid imageUrl from Stripe Checkout line item",
+          );
+        }
+        return {
+          quantity: line.quantity,
+          price_data: {
+            currency: view.currency,
+            unit_amount: line.unitPriceMinor,
+            product_data: {
+              name: line.name,
+              ...(line.description ? { description: line.description.slice(0, 200) } : {}),
+              ...(validImage ? { images: [validImage] } : {}),
+            },
+          },
+        } satisfies Stripe.Checkout.SessionCreateParams.LineItem;
+      },
+    );
+
+    // Append the delivery fee as its own line item so the customer
+    // sees a clean "Delivery — £X.XX" row on Stripe's checkout page.
+    // We deliberately don't use Stripe's `shipping_options` API
+    // because that requires `shipping_address_collection`, which
+    // would re-prompt the customer for an address they've already
+    // entered on /cart. A plain line item gives the same accounting
+    // outcome (the fee charges, the receipt shows it) without the
+    // duplicate-address UX. Skipped when shipping is 0 — no
+    // misleading "£0 delivery" row on the receipt.
+    if (shippingMinor > 0) {
+      lineItems.push({
+        quantity: 1,
         price_data: {
           currency: view.currency,
-          unit_amount: line.unitPriceMinor,
+          unit_amount: shippingMinor,
           product_data: {
-            name: line.name,
-            ...(line.description ? { description: line.description.slice(0, 200) } : {}),
-            ...(validImage ? { images: [validImage] } : {}),
+            name: shippingZoneName
+              ? `Delivery — ${shippingZoneName}`
+              : "Delivery",
           },
         },
-      } satisfies Stripe.Checkout.SessionCreateParams.LineItem;
-    });
+      });
+    }
 
     let session: Stripe.Checkout.Session;
     try {

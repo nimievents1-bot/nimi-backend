@@ -87,7 +87,7 @@ export class AdminSiteImagesController {
   ) {
     if (!isValidSiteImageKey(key)) {
       throw new BadRequestException(
-        "Key must be lowercase letters/numbers, optionally dot-segmented (e.g. `hero.home`).",
+        "Key must be letters/numbers (either case), optionally dot- or hyphen-segmented (e.g. `hero.home`, `gifting.softLuxe`).",
       );
     }
     return this.siteImages.upsert(key, dto, user.id, {
@@ -106,7 +106,7 @@ export class AdminSiteImagesController {
   ) {
     if (!isValidSiteImageKey(key)) {
       throw new BadRequestException(
-        "Key must be lowercase letters/numbers, optionally dot-segmented.",
+        "Key must be letters/numbers (either case), optionally dot- or hyphen-segmented.",
       );
     }
     return this.siteImages.remove(key, user.id, {

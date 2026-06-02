@@ -69,7 +69,7 @@ export class AdminSiteSettingsController {
   ) {
     if (!isValidSiteSettingKey(key)) {
       throw new BadRequestException(
-        "Key must be lowercase letters/numbers, optionally dot- or hyphen-segmented (e.g. `gifting.production-timeline.pill`).",
+        "Key must be letters/numbers (either case), optionally dot- or hyphen-segmented (e.g. `gifting.production-timeline.pill`).",
       );
     }
     return this.siteSettings.upsert(key, dto, user.id, {
@@ -88,7 +88,7 @@ export class AdminSiteSettingsController {
   ) {
     if (!isValidSiteSettingKey(key)) {
       throw new BadRequestException(
-        "Key must be lowercase letters/numbers, optionally dot- or hyphen-segmented.",
+        "Key must be letters/numbers (either case), optionally dot- or hyphen-segmented.",
       );
     }
     return this.siteSettings.remove(key, user.id, {

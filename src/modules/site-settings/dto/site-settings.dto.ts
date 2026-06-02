@@ -1,10 +1,13 @@
 import { IsString, MaxLength } from "class-validator";
 
 /**
- * Key format identical to `SiteImage`: lowercase letters/numbers,
- * optionally dot- or hyphen-segmented.
+ * Key format identical to `SiteImage`: letters (either case) and
+ * digits, optionally dot- or hyphen-segmented. See the doc comment
+ * on `SiteImage`'s regex for why we accept camelCase as well as
+ * lowercase — the web registries mix both, and forcing one would
+ * break legacy keys.
  */
-const KEY_REGEX = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const KEY_REGEX = /^[a-zA-Z0-9]+(?:[.-][a-zA-Z0-9]+)*$/;
 
 /**
  * Body for `PUT /v1/admin/site-settings/:key`.
