@@ -236,6 +236,129 @@ model SiteImage {
   createdAt DateTime @default(now())
 }
 
+///
+/// ShippingZone — admin-editable delivery fee zones.
+///
+/// Each row defines a delivery region by postcode prefixes, the
+/// base fee that applies inside it, and an optional free-delivery
+/// threshold the operator can toggle per zone (for regional
+/// promotions etc.).
+///
+/// Resolution algorithm at checkout:
+///   1. Normalise the customer's postcode (uppercase, strip spaces).
+///   2. Walk all `active` rows ordered by `position` ascending.
+///   3. The first row whose `postcodePrefixes` array contains a
+///      prefix matching the start of the postcode wins.
+///   4. If no prefix matches, the first `active` row with an empty
+///      `postcodePrefixes` array (the catch-all) wins.
+///   5. If still none, the cart refuses to proceed and surfaces a
+///      "we don't ship to that postcode yet" message — better than
+///      silently sneaking a default fee through.
+///
+/// Why postcode prefixes as JSON not a many-to-many table:
+///   The relationship is shallow (a few prefixes per zone, no
+///   first-class identity for a prefix). JSON keeps the schema
+///   minimal and the admin UI dead simple — one comma-separated
+///   input. We never query "which zone covers prefix X" by joining;
+///   we just walk all active rows in memory at fee-compute time.
+///
+model ShippingZone {
+  id              String   @id @default(uuid())
+
+  /// Human-readable name shown to the customer and in admin.
+  /// e.g. "Local (Yorkshire)", "UK mainland", "Highlands & Islands".
+  name            String
+
+  /// Optional admin note — context only, never surfaced to customers.
+  description     String?
+
+  /// Array of postcode prefixes that match this zone. Empty array
+  /// makes the row a catch-all default (only one active row should
+  /// typically have an empty array — the admin form warns when
+  /// it sees more than one).
+  ///
+  /// Stored as JSON array of strings; the service normalises to
+  /// uppercase + trims at write time.
+  postcodePrefixes Json     @default("[]")
+
+  /// Base delivery fee in minor units. Can be 0 (e.g. for a
+  /// permanent free-delivery zone or a regional promotion).
+  feeMinor        Int
+
+  /// Per-zone toggle for "free delivery over X". When false the
+  /// `freeOverMinor` value is ignored and every order in this
+  /// zone pays `feeMinor`.
+  freeOverEnabled Boolean  @default(false)
+
+  /// Threshold in minor units above which delivery is free in this
+  /// zone. Only meaningful when `freeOverEnabled` is true.
+  freeOverMinor   Int?
+
+  /// Whether the zone is in effect. Disabled zones are skipped by
+  /// the resolution algorithm — useful for testing a new zone or
+  /// taking a region offline temporarily without deleting the row.
+  active          Boolean  @default(true)
+
+  /// Lower values render earlier in the admin list and are checked
+  /// first by the resolution algorithm. Operator can move a
+  /// promotional zone to position 0 to make sure it wins over the
+  /// standard zone for the same postcodes.
+  position        Int      @default(0)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  updatedBy       String?
+
+  @@index([active, position])
+}
+
+///
+/// SiteSetting — admin-editable plain-text snippets that appear on
+/// the public marketing site. Sibling to `SiteImage`: same key/value
+/// shape, same registry-backed admin UI, just for text instead of
+/// image URLs.
+///
+/// Examples of things stored here:
+///   - "gifting.production-timeline.pill"   → "Production 6–12 wks"
+///   - "gifting.production-timeline.lede"   → "Production time is
+///                                              six to twelve weeks
+///                                              depending on
+///                                              complexity"
+///
+/// The public marketing site reads through `lib/siteSettings.ts`,
+/// which falls back to a code-level default for any key that has
+/// no row yet — so the site is never blank while the operator is
+/// still working through the admin form.
+///
+/// We use plain text here rather than ContentBlock because:
+///   - ContentBlock requires every payload type to be pre-registered
+///     in the Zod discriminated union (`blocks.ts`). Adding a new
+///     "kind of text" needs a code change. SiteSetting is open-set
+///     — operators can add keys without touching block schemas.
+///   - These are small editable strings, not rich-text articles.
+///     Hosting them in a strict CMS would be overkill.
+///   - The registry pattern (see SiteImage) gives the operator a
+///     single discoverable admin surface listing every editable
+///     setting — far better than "navigate to /admin/content,
+///     remember the page+key, edit the block".
+///
+model SiteSetting {
+  /// e.g. "gifting.production-timeline.pill". Lowercase, dot-
+  /// segmented. Stable across edits; serves as the lookup key on
+  /// both sides. See `SiteImage.key` for the same convention.
+  key       String   @id
+
+  /// The editable string itself. Bounded at the DB level by Postgres'
+  /// `text` type (effectively unlimited); the admin DTO caps it at
+  /// 8000 chars so a runaway paste doesn't hide an entire page of
+  /// HTML into a tag pill.
+  value     String
+
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
 model Faq {
   id        String  @id @default(uuid())
   category  String
