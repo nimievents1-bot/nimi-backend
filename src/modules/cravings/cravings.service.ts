@@ -302,18 +302,27 @@ export class CravingsService implements OnModuleInit {
    * Open a Stripe Customer Portal session so the customer can pause, change
    * plan, update card, or cancel. Returns the URL the web should redirect to.
    */
-  async createPortalSession(userId: string): Promise<{ url: string }> {
+  async createPortalSession(user: SessionUser): Promise<{ url: string }> {
     if (!this.stripe.isAvailable()) {
       throw new ServiceUnavailableException("Subscriptions are not available right now.");
     }
 
-    const sub = await this.db.subscription.findUnique({ where: { userId } });
+    // Require an existing Subscription row before opening the portal:
+    // there's no point launching the portal for a user who has never
+    // subscribed (it would just show an empty state and confuse them).
+    const sub = await this.db.subscription.findUnique({ where: { userId: user.id } });
     if (!sub) throw new NotFoundException();
+
+    // Route through `ensureStripeCustomer` so a stale stripeCustomerId
+    // self-heals here too. Without this, the prior bug ("No such
+    // customer" → 500) returned even though the upstream save flow
+    // was already fixed.
+    const customerId = await this.ensureStripeCustomer(user);
 
     const origin = publicWebUrl();
 
     const portal = await this.stripe.sdk.billingPortal.sessions.create({
-      customer: sub.stripeCustomerId,
+      customer: customerId,
       return_url: `${origin}/account/subscription`,
     });
     return { url: portal.url };
@@ -1039,7 +1048,40 @@ export class CravingsService implements OnModuleInit {
 
   private async ensureStripeCustomer(user: SessionUser): Promise<string> {
     const existing = await this.db.subscription.findUnique({ where: { userId: user.id } });
-    if (existing?.stripeCustomerId) return existing.stripeCustomerId;
+    if (existing?.stripeCustomerId) {
+      // Verify the cached ID is still valid in Stripe. Three things
+      // can invalidate it: the operator deletes the customer in the
+      // dashboard; we switch the API key between live and test mode;
+      // a Stripe restore-from-backup invalidates the prior IDs.
+      // Without this check, every downstream call (portal session,
+      // checkout) 500s with "No such customer" and there's no
+      // recovery short of editing the DB by hand. Self-heal by
+      // detecting the stale ID and minting a fresh customer below.
+      try {
+        const customer = await this.stripe.sdk.customers.retrieve(
+          existing.stripeCustomerId,
+        );
+        // `retrieve` can return either a live customer or a
+        // "deleted: true" stub — both are objects. We treat the
+        // stub as "no usable customer" because Stripe will reject
+        // it from checkout / portal sessions even though it does
+        // technically exist in the account.
+        if (!customer.deleted) return existing.stripeCustomerId;
+        this.logger.warn(
+          { userId: user.id, staleId: existing.stripeCustomerId },
+          "Stored stripeCustomerId is marked deleted in Stripe — recreating.",
+        );
+      } catch (err) {
+        if (isStripeResourceMissing(err)) {
+          this.logger.warn(
+            { userId: user.id, staleId: existing.stripeCustomerId },
+            "Stored stripeCustomerId no longer exists in Stripe — recreating.",
+          );
+        } else {
+          throw err;
+        }
+      }
+    }
 
     const customer = await this.stripe.sdk.customers.create({
       email: user.email,

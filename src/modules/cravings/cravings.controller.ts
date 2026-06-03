@@ -72,7 +72,11 @@ export class CravingsController {
   @Post("portal")
   @HttpCode(201)
   async portal(@CurrentUser() user: AuthenticatedUser) {
-    return this.cravings.createPortalSession(user.id);
+    // Pass the full SessionUser so the service can route through
+    // ensureStripeCustomer — which self-heals stale stripeCustomerId
+    // values when the operator has switched between Stripe live and
+    // test modes (or deleted the customer in the dashboard).
+    return this.cravings.createPortalSession({ id: user.id, email: user.email });
   }
 
   // ---------- customer reads ----------
