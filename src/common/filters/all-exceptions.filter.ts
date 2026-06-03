@@ -70,6 +70,34 @@ export class AllExceptionsFilter implements ExceptionFilter {
       const tagged = classifyError(exception);
       title = tagged.title;
       detail = tagged.detail;
+
+      // Diagnostic surface: include the error name + the first 200
+      // characters of the message in the response under `_debug`.
+      // This is NEVER displayed in the customer UI (the form only
+      // renders `detail`) — it's there for the operator to inspect
+      // in DevTools or curl. We deliberately:
+      //
+      //   - Keep the body's `detail` field generic (no internal
+      //     details leaked to the user-visible message).
+      //   - Truncate the upstream message so a Prisma message
+      //     containing the full SQL can't bloat the response.
+      //   - Strip newlines so the JSON stays single-line / safe.
+      //   - Only attach for paths under `/v1/admin/`. Public
+      //     endpoints get nothing extra — the customer never sees
+      //     internal error names regardless.
+      const isAdminPath = typeof req.url === "string" && /\/admin\//.test(req.url);
+      if (isAdminPath) {
+        const safeMessage = exception.message
+          ? exception.message.replace(/[\r\n]+/g, " ").slice(0, 200)
+          : "";
+        extras = {
+          ...(extras ?? {}),
+          _debug: {
+            name: exception.name,
+            message: safeMessage,
+          },
+        };
+      }
     }
 
     const requestId = req.id ?? "unknown";
@@ -119,21 +147,40 @@ function classifyError(err: Error): { title: string; detail: string } {
   const name = err.name ?? "";
   const msg = err.message ?? "";
 
-  // Stripe SDK errors all subclass Error and set `name` to one of
-  // "StripeInvalidRequestError", "StripeAuthenticationError", etc.
-  if (name.startsWith("Stripe")) {
-    if (name === "StripeAuthenticationError") {
+  // Stripe SDK errors. Two detection paths because the Stripe Node
+  // SDK (v17+) stopped setting `.name = "StripeInvalidRequestError"`
+  // and now puts the discriminator on `.type` instead while leaving
+  // `.name` as the bare string "Error". We accept either fingerprint
+  // so future SDK churn doesn't silently re-break classification.
+  const stripeType =
+    typeof (err as { type?: unknown }).type === "string"
+      ? ((err as { type: string }).type)
+      : undefined;
+  const isStripeShaped =
+    name.startsWith("Stripe") ||
+    (stripeType !== undefined && stripeType.startsWith("Stripe"));
+  if (isStripeShaped) {
+    const effectiveName = name.startsWith("Stripe") ? name : stripeType ?? name;
+    if (effectiveName === "StripeAuthenticationError") {
       return {
         title: "Payment provider misconfigured",
         detail:
           "We couldn't reach our payment provider. The site administrator has been notified.",
       };
     }
-    if (name === "StripeInvalidRequestError") {
+    if (effectiveName === "StripeInvalidRequestError") {
+      // The single most common StripeInvalidRequestError for us is
+      // "No such product/price/customer" — the stored ID points at
+      // a resource that no longer exists in the current Stripe
+      // account / mode. Surface a hint so the operator immediately
+      // sees the cause rather than the generic message.
+      const hint = /No such (product|price|customer)/i.exec(msg);
+      const tailoredDetail = hint
+        ? `Stripe doesn't recognise that ${hint[1]} — it was either deleted, or the API key was switched between live and test mode. Reset the Stripe IDs on this record and try again.`
+        : "We couldn't set up the payment for this order. Please refresh and try again — if the problem persists, contact support.";
       return {
         title: "Payment setup error",
-        detail:
-          "We couldn't set up the payment for this order. Please refresh and try again — if the problem persists, contact support.",
+        detail: tailoredDetail,
       };
     }
     return {

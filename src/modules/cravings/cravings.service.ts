@@ -33,6 +33,26 @@ interface RequestMeta {
   userAgent?: string;
 }
 
+/**
+ * Returns true for Stripe SDK errors that mean "the resource you
+ * referenced doesn't exist in this account/mode". The Stripe v17 SDK
+ * leaves `err.name` as the bare string "Error" (not
+ * "StripeInvalidRequestError" as older versions did), so we cannot
+ * rely on the class name. Instead we check the canonical fields the
+ * SDK guarantees: `type` (the discriminator) and `code` (the
+ * machine-readable reason). A fallback string-match on the message
+ * is included as belt-and-braces against future SDK schema changes.
+ */
+function isStripeResourceMissing(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { type?: unknown; code?: unknown; message?: unknown };
+  if (e.code === "resource_missing") return true;
+  if (e.type === "StripeInvalidRequestError" && typeof e.message === "string") {
+    return /No such (product|price|customer|plan)/i.test(e.message);
+  }
+  return false;
+}
+
 interface SessionUser {
   id: string;
   email: string;
@@ -354,18 +374,52 @@ export class CravingsService implements OnModuleInit {
     let stripeProductId = existing?.stripeProductId ?? null;
     let stripePriceId = existing?.stripePriceId ?? null;
 
-    // Create / reuse Stripe Product + Price when the price changes or the plan is being published.
+    // Create / reuse Stripe Product + Price when the price changes
+    // or the plan is being published.
+    //
+    // Self-healing path: if `stripeProductId` is set but the product
+    // no longer exists in Stripe (e.g. the operator deleted it in
+    // the dashboard, or the env was switched between test and live
+    // mode and IDs from one don't exist in the other), Stripe throws
+    // `StripeInvalidRequestError` with `code: "resource_missing"`.
+    // Treat that as "the stored ID is stale" and fall back to
+    // creating a fresh product. Without this, every save on a tier
+    // with a stale ID would 500 forever, and the operator would have
+    // to edit the DB by hand to recover. Same logic for the price.
     if (this.stripe.isAvailable()) {
-      const product = stripeProductId
-        ? await this.stripe.sdk.products.update(stripeProductId, {
+      let product: Stripe.Product | null = null;
+      if (stripeProductId) {
+        try {
+          product = await this.stripe.sdk.products.update(stripeProductId, {
             name: dto.name,
             ...(dto.description ? { description: dto.description } : {}),
-          })
-        : await this.stripe.sdk.products.create({
-            name: dto.name,
-            ...(dto.description ? { description: dto.description } : {}),
-            metadata: { planSlug: dto.slug },
           });
+        } catch (err) {
+          // Narrow on the Stripe code rather than err.name because
+          // the SDK leaves `.name` as the literal "Error" — see the
+          // exception filter's classifyError for the gory details.
+          if (isStripeResourceMissing(err)) {
+            this.logger.warn(
+              { planSlug: dto.slug, staleId: stripeProductId },
+              "Stored stripeProductId no longer exists in Stripe — recreating.",
+            );
+            stripeProductId = null;
+            // Also clear the price ID — a price is bound to a
+            // specific product, so the stale product invalidates
+            // the price too. We'll mint both anew below.
+            stripePriceId = null;
+          } else {
+            throw err;
+          }
+        }
+      }
+      if (!product) {
+        product = await this.stripe.sdk.products.create({
+          name: dto.name,
+          ...(dto.description ? { description: dto.description } : {}),
+          metadata: { planSlug: dto.slug },
+        });
+      }
       stripeProductId = product.id;
 
       const needsNewPrice =
@@ -374,9 +428,16 @@ export class CravingsService implements OnModuleInit {
         (existing?.currency ?? "gbp") !== currency;
 
       if (needsNewPrice) {
-        // Archive the old price so it can't be used by new checkouts.
+        // Archive the old price so it can't be used by new
+        // checkouts. Swallow errors here because the price might
+        // already be archived or missing — we don't want a stale
+        // ID lookup to block the main save path. Distinct from
+        // the product recovery above, which is needed for
+        // correctness; this is best-effort cleanup.
         if (stripePriceId) {
-          await this.stripe.sdk.prices.update(stripePriceId, { active: false }).catch(() => {});
+          await this.stripe.sdk.prices
+            .update(stripePriceId, { active: false })
+            .catch(() => {});
         }
         const price = await this.stripe.sdk.prices.create({
           unit_amount: dto.monthlyAmountMinor,
