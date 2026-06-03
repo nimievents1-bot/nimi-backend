@@ -397,6 +397,9 @@ export class CravingsService implements OnModuleInit {
         monthlyAmountMinor: dto.monthlyAmountMinor,
         currency,
         description: dto.description ?? null,
+        // Tri-state on `imageUrl`: undefined → use null on create;
+        // explicit null → null; string → set.
+        imageUrl: dto.imageUrl ?? null,
         position: dto.position ?? 0,
         active: dto.active ?? false,
         stripeProductId,
@@ -407,6 +410,12 @@ export class CravingsService implements OnModuleInit {
         monthlyAmountMinor: dto.monthlyAmountMinor,
         currency,
         description: dto.description ?? null,
+        // On update: undefined → don't touch (preserve existing
+        // image); null → clear; string → set. Matches the
+        // pattern used for batchLimit on PastryItem.
+        ...(dto.imageUrl !== undefined
+          ? { imageUrl: dto.imageUrl === null ? null : dto.imageUrl }
+          : {}),
         ...(dto.position !== undefined ? { position: dto.position } : {}),
         ...(dto.active !== undefined ? { active: dto.active } : {}),
         stripeProductId,

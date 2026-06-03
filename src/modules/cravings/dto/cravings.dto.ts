@@ -36,6 +36,15 @@ export class UpsertCravingsPlanDto {
   @IsOptional() @IsString() @MaxLength(2_000)
   description?: string;
 
+  /**
+   * Optional hero image URL for the plan card on /cravings. Accept
+   * `null` so the admin can clear a previously-uploaded image
+   * without re-uploading. 2048-char cap matches typical R2/CDN
+   * URL ceilings.
+   */
+  @IsOptional() @IsString() @MaxLength(2048)
+  imageUrl?: string | null;
+
   @IsOptional() @Type(() => Number) @IsInt() @Min(0)
   position?: number;
 

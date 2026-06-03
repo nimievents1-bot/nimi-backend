@@ -750,6 +750,12 @@ model CravingsPlan {
   position           Int      @default(0)
   description        String?
 
+  /// Optional hero image for the plan card on `/cravings`. Null
+  /// renders the brand-gradient placeholder. Operator uploads via
+  /// the admin editor's image-picker through the existing R2
+  /// pipeline.
+  imageUrl           String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

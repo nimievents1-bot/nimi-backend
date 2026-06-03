@@ -50,6 +50,11 @@ export class CravingsController {
       // boolean — never the Price ID itself — so the public response
       // doesn't leak Stripe internals.
       stripeReady: Boolean(p.stripePriceId),
+      // Optional admin-uploaded hero image. The PlanGrid uses this in
+      // preference to its position-based placeholder photography. We
+      // surface `null` (not omit) so the web client can rely on the
+      // field being present and treat missing/cleared values the same.
+      imageUrl: p.imageUrl ?? null,
     }));
   }
 
@@ -111,6 +116,9 @@ export class AdminCravingsController {
       position: plan.position,
       active: plan.active,
       stripeReady: Boolean(plan.stripePriceId),
+      // Surface the optional hero image so the admin editor can
+      // pre-populate the URL field and the live preview tile.
+      imageUrl: plan.imageUrl,
     };
   }
 
