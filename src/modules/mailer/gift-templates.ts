@@ -138,7 +138,18 @@ export function giftOrderAdminNotifyTemplate(props: GiftAdminProps) {
       if (cust?.dates) custLines.push(`Dates: ${escapeHtml(cust.dates)}`);
       if (cust?.colourTheme) custLines.push(`Colour: ${escapeHtml(cust.colourTheme)}`);
       if (cust?.message) custLines.push(`Message: ${escapeHtml(cust.message)}`);
-      if (cust?.logoUrl) custLines.push(`Logo: ${escapeHtml(cust.logoUrl)}`);
+      if (cust?.logoUrl) {
+        // Render the logo URL as a real anchor so the admin can
+        // open it with one click from the order email. We still
+        // escapeHtml the URL (defence-in-depth) and constrain it
+        // to the href attribute — both the visible text and the
+        // attribute go through escapeHtml so a maliciously crafted
+        // URL can't break out of the tag.
+        const safeUrl = escapeHtml(cust.logoUrl);
+        custLines.push(
+          `Logo: <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color:${BRAND_COLOURS.maroon600};text-decoration:underline;">Open / download</a>`,
+        );
+      }
       const custBlock =
         custLines.length > 0
           ? `<div style="margin-top:4px;font-size:12px;color:${BRAND_COLOURS.neutral500};line-height:1.5;">${custLines.join("<br>")}</div>`

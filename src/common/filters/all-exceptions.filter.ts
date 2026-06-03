@@ -100,6 +100,20 @@ export class AllExceptionsFilter implements ExceptionFilter {
  * logs for the operator. Never echoes raw library messages verbatim
  * because they often contain internal IDs the customer doesn't need
  * to see.
+ *
+ * Coverage notes:
+ *   - Stripe SDK errors: prefix-matched on `name` so every subclass
+ *     (Invalid, Authentication, Card, RateLimit, Permission, etc.)
+ *     gets a Stripe-shaped response.
+ *   - Prisma errors: we recognise all five client error classes that
+ *     Prisma 5 throws. The previous version only matched two, which
+ *     left "schema drift" / "engine panic" / "init failed" cases
+ *     falling through to a useless generic message.
+ *   - Network errors: matches FetchError as well as the bare Node
+ *     error codes (ECONN, ETIMEDOUT, ENOTFOUND, ECONNRESET).
+ *   - Programmer errors: TypeError / ReferenceError / RangeError are
+ *     surfaced with a clearer title so the operator immediately knows
+ *     it's a code bug rather than a downstream service hiccup.
  */
 function classifyError(err: Error): { title: string; detail: string } {
   const name = err.name ?? "";
@@ -129,20 +143,55 @@ function classifyError(err: Error): { title: string; detail: string } {
     };
   }
 
-  // Prisma client errors all have `code` starting with "P".
-  if (name === "PrismaClientKnownRequestError" || name === "PrismaClientValidationError") {
+  // All five Prisma 5 client error classes. Catching the variants
+  // matters: an outdated client (schema column missing locally) throws
+  // PrismaClientValidationError; a missing DB column throws
+  // PrismaClientKnownRequestError (P2022); a broken DB connection
+  // throws PrismaClientInitializationError; a Rust panic in the query
+  // engine throws PrismaClientRustPanicError; everything else throws
+  // PrismaClientUnknownRequestError.
+  if (
+    name === "PrismaClientKnownRequestError" ||
+    name === "PrismaClientValidationError" ||
+    name === "PrismaClientInitializationError" ||
+    name === "PrismaClientUnknownRequestError" ||
+    name === "PrismaClientRustPanicError"
+  ) {
+    // Prisma includes the SQLSTATE-style code (P2022, etc.) on the
+    // known-error class. Surfacing it in the operator-facing detail
+    // keeps customer responses generic but still gives the operator
+    // a one-liner to grep without needing log access. We're careful
+    // to truncate the upstream message because Prisma's message can
+    // contain table / column names which leak the schema; only
+    // surface the code, not the body.
+    const codeMatch = /\bP\d{4}\b/.exec(msg);
+    const codeHint = codeMatch ? ` (${codeMatch[0]})` : "";
     return {
       title: "Database error",
-      detail: "We couldn't save the request. Please try again in a moment.",
+      detail: `We couldn't save the request. Please try again in a moment${codeHint}.`,
     };
   }
 
-  // Network / fetch failures inside the API (e.g. talking to Resend).
-  if (name === "FetchError" || /ECONN|ETIMEDOUT|ENOTFOUND/.test(msg)) {
+  // Network / fetch failures inside the API (e.g. talking to Resend
+  // or Stripe). Match FetchError plus bare Node connect/dns codes —
+  // ECONNRESET is the new EAGAIN, hit it once a day on busy infra.
+  if (name === "FetchError" || /ECONN|ETIMEDOUT|ENOTFOUND|ECONNRESET/.test(msg)) {
     return {
       title: "Network error",
       detail:
         "An upstream service didn't respond in time. Please try again in a moment.",
+    };
+  }
+
+  // Programmer errors. These are bugs, not transient failures —
+  // give the operator a different title so dashboards/alerts can
+  // separate "production bug" from "downstream outage" without
+  // string-matching the body.
+  if (name === "TypeError" || name === "ReferenceError" || name === "RangeError") {
+    return {
+      title: "Application error",
+      detail:
+        "Something went wrong on our side. The team has been notified — please try again or use a different field.",
     };
   }
 
