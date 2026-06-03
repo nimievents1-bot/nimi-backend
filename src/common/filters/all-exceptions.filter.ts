@@ -152,10 +152,15 @@ function classifyError(err: Error): { title: string; detail: string } {
   // and now puts the discriminator on `.type` instead while leaving
   // `.name` as the bare string "Error". We accept either fingerprint
   // so future SDK churn doesn't silently re-break classification.
-  const stripeType =
-    typeof (err as { type?: unknown }).type === "string"
-      ? ((err as { type: string }).type)
-      : undefined;
+  //
+  // We read `.type` defensively: it exists on Stripe errors but not
+  // on Error in general, so the access is typed as `unknown` and
+  // narrowed via `typeof` before being treated as a string. This is
+  // also why the cast goes through a `{ type?: unknown }` shape —
+  // a direct cast to `{ type: string }` would (correctly) be flagged
+  // by TS as overlapping insufficiently with `Error`.
+  const maybeType = (err as { type?: unknown }).type;
+  const stripeType = typeof maybeType === "string" ? maybeType : undefined;
   const isStripeShaped =
     name.startsWith("Stripe") ||
     (stripeType !== undefined && stripeType.startsWith("Stripe"));
