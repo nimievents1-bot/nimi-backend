@@ -597,10 +597,12 @@ export class PastryCartService {
     const item = row.pastryItem;
 
     // ---- Batch cap check ----
-    // Only "increase" mutations can violate this; if the customer is
-    // dropping their quantity, headroom only grows. We still check on
-    // any change because the math is cheap and consistent.
-    if (item.batchLimit !== null) {
+    // Only enforce when the customer is INCREASING their quantity.
+    // Reductions never make the capacity problem worse — and if
+    // bookedForOthers has filled the entire batchLimit, remaining=0,
+    // which would block even a 4→3 reduction. Skip the check
+    // entirely for decreases so the customer can always reduce.
+    if (item.batchLimit !== null && dto.quantity > row.quantity) {
       const totalToday = await this.bookedTodayByItem([item.id]);
       const userToday = await this.bookedTodayByItemForUser(userId, [item.id]);
       const bookedForOthers = Math.max(
