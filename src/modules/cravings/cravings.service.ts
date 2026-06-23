@@ -45,10 +45,15 @@ interface RequestMeta {
  */
 function isStripeResourceMissing(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
-  const e = err as { type?: unknown; code?: unknown; message?: unknown };
+  const e = err as { type?: unknown; name?: unknown; code?: unknown; message?: unknown };
   if (e.code === "resource_missing") return true;
-  if (e.type === "StripeInvalidRequestError" && typeof e.message === "string") {
-    return /No such (product|price|customer|plan)/i.test(e.message);
+  // e.type is the Stripe API error type ("invalid_request_error"), not the class name.
+  // e.name is the SDK class name ("StripeInvalidRequestError"). Check both for safety.
+  const isInvalidRequest =
+    e.type === "invalid_request_error" || e.name === "StripeInvalidRequestError";
+  if (isInvalidRequest && typeof e.message === "string") {
+    return /No such (product|price|customer|plan)/i.test(e.message) ||
+      /similar object exists in test mode/i.test(e.message);
   }
   return false;
 }
