@@ -22,10 +22,7 @@ import {
   type PastryOrderStatusForEmail,
 } from "../mailer/pastry-templates";
 import { NotificationsService } from "../notifications/notifications.service";
-import {
-  PastryCartService,
-  PASTRY_CART_MIN_MINOR,
-} from "../pastry-cart/pastry-cart.service";
+import { PastryCartService } from "../pastry-cart/pastry-cart.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { PromoCodesService } from "../promo-codes/promo-codes.service";
 import { ShippingService } from "../shipping/shipping.service";
@@ -89,7 +86,7 @@ export class PastryOrdersService {
       throw new BadRequestException("Your cart is empty.");
     }
     if (!view.meetsMinimum) {
-      const minPounds = (PASTRY_CART_MIN_MINOR / 100).toFixed(2);
+      const minPounds = (view.minimumMinor / 100).toFixed(2);
       throw new BadRequestException(
         `Minimum order is £${minPounds}. Add a few more items to continue.`,
       );

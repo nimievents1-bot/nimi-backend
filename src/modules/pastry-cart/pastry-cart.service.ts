@@ -8,6 +8,7 @@ import {
 import { PastryOrderStatus, Prisma } from "@prisma/client";
 
 import { PrismaService } from "../prisma/prisma.service";
+import { SiteSettingsService } from "../site-settings/site-settings.service";
 
 import { type AddToCartDto, type UpdateCartItemDto } from "./dto/cart.dto";
 
@@ -110,7 +111,9 @@ interface CartView {
   applicableCreditMinor: number;
   /** Final amount Stripe will charge after credits applied. */
   payableMinor: number;
-  /** Subtotal meets the £25 floor. */
+  /** The active minimum order floor in minor units (admin-configurable). */
+  minimumMinor: number;
+  /** Subtotal meets the minimum order floor. */
   meetsMinimum: boolean;
   /**
    * Every line carries at least its item's `minQuantity`. False
@@ -127,14 +130,11 @@ interface CartView {
 }
 
 /**
- * Minimum cart subtotal in minor units (£25). Enforced at checkout — the
- * cart can hold less while the customer is still building it, but the
- * checkout endpoint refuses to issue a Stripe session below this floor.
- *
- * Matches the customer-facing rule on `/cravings` ("Minimum order £25"),
- * which the operator committed to in the Indulgence Club rebrand.
+ * Hard-coded fallback minimum cart subtotal in minor units (£25).
+ * The live value is read from the `pastry.order.minimum-pence` site
+ * setting at runtime; this constant is only used when no override exists.
  */
-export const PASTRY_CART_MIN_MINOR = 2500;
+const PASTRY_CART_MIN_MINOR_DEFAULT = 2500;
 
 /**
  * PastryCartService — backs the customer cart UI and feeds checkout.
@@ -151,8 +151,30 @@ export const PASTRY_CART_MIN_MINOR = 2500;
 @Injectable()
 export class PastryCartService {
   private readonly logger = new Logger(PastryCartService.name);
+  private minimumCache: { value: number; expiresAt: number } | null = null;
 
-  constructor(private readonly db: PrismaService) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly siteSettings: SiteSettingsService,
+  ) {}
+
+  /**
+   * Read the minimum order amount from the admin-configurable
+   * `pastry.order.minimum-pence` site setting. Cached for 5 minutes
+   * so cart views don't hit the DB on every render. Falls back to
+   * £25 (2500p) if the setting is unset or not a valid integer.
+   */
+  private async resolveMinimum(): Promise<number> {
+    const now = Date.now();
+    if (this.minimumCache && now < this.minimumCache.expiresAt) {
+      return this.minimumCache.value;
+    }
+    const setting = await this.siteSettings.getByKey("pastry.order.minimum-pence");
+    const parsed = setting ? parseInt(setting.value, 10) : NaN;
+    const value = Number.isFinite(parsed) && parsed > 0 ? parsed : PASTRY_CART_MIN_MINOR_DEFAULT;
+    this.minimumCache = { value, expiresAt: now + 5 * 60 * 1000 };
+    return value;
+  }
 
   // ---------- read ----------
 
@@ -174,14 +196,14 @@ export class PastryCartService {
    * lines, and computes credit auto-application + Stripe payable amount.
    */
   async view(userId: string): Promise<CartView> {
-    const cart = await this.db.pastryCart.findUnique({
-      where: { userId },
-      include: {
-        items: { include: { pastryItem: true } },
-      },
-    });
-
-    const balance = await this.creditBalance(userId);
+    const [cart, balance, minimumMinor] = await Promise.all([
+      this.db.pastryCart.findUnique({
+        where: { userId },
+        include: { items: { include: { pastryItem: true } } },
+      }),
+      this.creditBalance(userId),
+      this.resolveMinimum(),
+    ]);
 
     if (!cart) {
       return {
@@ -191,6 +213,7 @@ export class PastryCartService {
         creditBalanceMinor: balance,
         applicableCreditMinor: 0,
         payableMinor: 0,
+        minimumMinor,
         meetsMinimum: false,
         meetsAllItemMinimums: true,
         withinAllBatchLimits: true,
@@ -256,7 +279,8 @@ export class PastryCartService {
       creditBalanceMinor: balance,
       applicableCreditMinor,
       payableMinor,
-      meetsMinimum: subtotalMinor >= PASTRY_CART_MIN_MINOR,
+      minimumMinor,
+      meetsMinimum: subtotalMinor >= minimumMinor,
       meetsAllItemMinimums: lines.every((l) => l.meetsMinimum),
       withinAllBatchLimits: lines.every((l) => l.withinBatch),
     };
